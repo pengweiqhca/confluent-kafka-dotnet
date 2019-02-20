@@ -1,3 +1,53 @@
+# 1.0.x (unreleased)
+
+## New Features
+
+- Added GET subject versions to the cached schema registry client.
+
+## Fixes
+
+- Corrected an error in the `rd_kafka_event_type` method signature which was causing incompatibility with mono.
+- Audited exception use across the library and made changes in various places where appropriate.
+- Removed unused CancellationToken parameters (we will add them back when implemented).
+- Builder classes now return interfaces, not concrete classes.
+
+
+# 1.0.0-beta3
+
+## New Features
+
+- Revamped producer and consumer serialization functionality.
+  - There are now two types of serializer and deserializer: `ISerializer<T>` / `IAsyncSerializer<T>` and `IDeserializer<T>` / `IAsyncDeserializer<T>`.
+    - `ISerializer<T>`/`IDeserializer<T>` are appropriate for most use cases. 
+    - `IAsyncSerializer<T>`/`IAsyncDeserializer<T>` are async friendly, but less performant (they return `Task`s).
+  - Changed the name of `Confluent.Kafka.Avro` to `Confluent.SchemaRegistry.Serdes` (Schema Registry may support other serialization formats in the future).
+  - Added an example demonstrating working with protobuf serialized data.
+- `Consumer`s, `Producer`s and `AdminClient`s are now constructed using builder classes.
+  - This is more verbose, but provides a sufficiently flexible and future proof API for specifying serdes and other configuration information.
+  - All `event`s on the client classes have been replaced with corresponding `Set...Handler` methods on the builder classes.
+    - This allows (enforces) handlers are set on librdkafka initialization (which is important for some handlers, particularly the log handler).
+    - `event`s allow for more than one handler to be set, but this is often not appropriate (e.g. `OnPartitionsAssigned`), and never necessary. This is no longer possible.
+    - `event`s are also not async friendly (handlers can't return `Task`). The Set...Handler appropach can be extend in such a way that it is.
+- Avro serdes no longer make blocking calls to `ICachedSchemaRegistryClient` - everything is `await`ed.
+  - Note: The `Consumer` implementation still calls async deserializers synchronously because the `Consumer` API is still otherwise fully synchronous.
+- Reference librdkafka.redist [1.0.0-RC7](https://github.com/edenhill/librdkafka/releases/tag/v1.0.0-RC7)
+  - Notable features: idempotent producer, sparse connections, KIP-62 (max.poll.interval.ms).
+  - Note: End of partition notification is now disabled by default (enable using the `EnablePartitionEof` config property).
+- Removed the `Consumer.OnPartitionEOF` event in favor notifying of partition eof via `ConsumeResult.IsPartitionEOF`.
+- Removed `ErrorEvent` class and added `IsFatal` to `Error` class. 
+  - The `IsFatal` flag is now set appropriately for all errors (previously it was always set to `false`).
+- Added `PersistenceStatus` property to `DeliveryResult`, which provides information on the persitence status of the message.
+
+## Fixes
+
+- Added `Close` method to `IConsumer` interface.
+- Changed the name of `ProduceException.DeliveryReport` to `ProduceException.DeliveryResult`.
+- Fixed bug where enum config property couldn't be read after setting it.
+- Added `SchemaRegistryBasicAuthCredentialsSource` back into `SchemaRegistryConfig` (#679).
+- Fixed schema registry client failover connection issue (#737).
+- Improvements to librdkafka dependnecy discovery (#743).
+
+
 # 1.0.0-beta2
 
 ## New Features
@@ -21,7 +71,7 @@
 - Added a `Handle` property to all clients classes:
   - Producers can utilize the underlying librdkafka handle from other Producers (replaces the 0.11.x `GetSerializingProducer` method on the `Producer` class).
   - `AdminClient` can utilize the underlying librdkafka handle from other `AdminClient`s, `Producer`s or `Consumer`s.
-- `IDeserializer` now exposes message data via `ReadOnlySpan<byte>`, directly referencing librdkafka allocated memory. This results in considerable (up to 2x) performance and reduced memory.
+- `IDeserializer` now exposes message data via `ReadOnlySpan<byte>`, directly referencing librdkafka allocated memory. This results in a considerable (up to 2x) performance increase and reduced memory.
 - Most blocking operations now accept a `CancellationToken` parameter. 
   - TODO: in some cases there is no backing implementation yet.
 - .NET Specific configuration parameters are all specified/documented in the `ConfigPropertyNames` class.
@@ -32,7 +82,7 @@
   - `ProduceAsync` / `BeginProduce` now return a `DeliveryReport` object and `Consumer.Consume` returns a `ConsumeResult` object.
 - The methods used to produce messages have changed:
   - Methods that accept a callback are now named `BeginProduce` (not `ProduceAsync`), analogous to similar methods in the standard library.
-  - Callbacks are now specified as `Action<DeliveryReport<TKey, TValue>>` delegates, not implementations of `IDeliveryHandler`.
+  - Callbacks are now specified as `Action<DeliveryReportResult<TKey, TValue>>` delegates, not implementations of `IDeliveryHandler`.
   - The `IDeliveryHandler` interface has been depreciated.
   - There are two variants of `ProduceAsync` and `BeginProduce`, the first takes a topic name and a `Message`. The second takes a `TopicPartition` and a message.
     - i.e. when producing, there is now clear separation between what is produced and where it is produced to.
@@ -41,18 +91,13 @@
 - The feature to block `ProduceAsync` calls on local queue full has been removed (result in `Local_QueueFull` error). This should be implemented at the application layer if required.
 - The non-serializing `Producer` and non-deserializing `Consumer` types have been removed (use generic types with `byte[]` instead), considerably reducing API surface area.
 - The `ISerializingProducer` interface has been removed - you can achieve the same functionality by sharing client handles instead.
-- The `Consumer.Poll` method and corresponding `OnMessage` event have been removed. You should use `Consumer` or `ConsumerAsync` instead.
-- The `Consumer.OnPartitionEOF` event has been removed. You should inspect the `ConsumeResult` instance returned from `Consumer.Consume` instead.
+- The `Consumer.Poll` method and corresponding `OnMessage` event have been removed. You should use `Consumer.Consume` instead.
 - The `Consumer.OnConsumeError` has been removed. Consume errors are now exposed via a `ConsumeException`.
 - The `Consumer.Consume` method now returns a `ConsumeResult` object, rather than a `Message` via an out parameter.
-- Added `Consumer.ConsumeAsync` methods.
-  - TODO: this is not finalized. there is an ongoing discussion relating to rebalence semantics.
-- `CommitAsync` errors are now reported via an exception and method return values have correspondingly changed.
+- `CommitAsync` has been removed (use `Commit` instead).
+- `Commit` errors are reported via an exception and method return values have correspondingly changed.
 - `ListGroups`, `ListGroup`, `GetWatermarkOffsets`, `QueryWatermarkOffsets`, and `GetMetadata` have been removed from `Producer` and `Consumer` and exposed only via `AdminClient`.
-  - TODO: these method signatures need work / extra capability and will be depreciated. we should try to update before 1.0.
-- Added `Consumer.Close` and the `Consumer.Dispose` method no longer blocks.
-  - TODO: yes it does! this needs fixing.
-- Log handlers are now specified via configuration properties, not `OnLog` handlers. This allows logging to be enabled during client construction.
+- Added `Consumer.Close`.
 - Various methods that formerly returned `TopicPartitionOffsetError` / `TopicPartitionError` now return `TopicPartitionOffset` / `TopicPartition` and throw an exception in 
   case of error (with a `Result` property of type `TopicPartitionOffsetError` / `TopicPartitionError`).
 
@@ -63,7 +108,7 @@
 - `manualPoll` argument has been removed from the `Producer` constructor and is now a configuration option.
 - `enableDeliveryReports` argument has been removed from the `Producer` constructor and is now a configuration option.
 - Removed methods with a `millisecondsTimeout` parameter (always preferring a `TimeSpan` parameter).
-- Added `Consume` and `ConsumeAsync` variants without a timeout parameter (but with a `CancellationToken` parameter that is observed).
+- Added `Consumer.Consume` variants with a `CancellationToken` parameter.
 - Added A `Producer.Flush` method variant without a timeout parameter (but with a `CancellationToken` parameter that is observed).
 - Added the `SyslogLevel` enumeration, which is used by the log handler delegate.
 

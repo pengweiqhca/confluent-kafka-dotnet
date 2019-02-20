@@ -36,22 +36,22 @@ client. Thanks Andreas!
 confluent-kafka-dotnet is distributed via NuGet. We provide three packages:
 
 - [Confluent.Kafka](https://www.nuget.org/packages/Confluent.Kafka/) *[net45, netstandard1.3]* - The core client library.
-- [Confluent.Kafka.Avro](https://www.nuget.org/packages/Confluent.Kafka.Avro/) *[net452, netstandard2.0]* - Provides a serializer and deserializer for working with Avro serialized data with Confluent Schema Registry integration.
-- [Confluent.SchemaRegistry](https://www.nuget.org/packages/Confluent.SchemaRegistry/) *[net452, netstandard1.4]* - Confluent Schema Registry client (a dependency of Confluent.Kafka.Avro).
+- [Confluent.SchemaRegistry.Serdes](https://www.nuget.org/packages/Confluent.SchemaRegistry.Serdes/) *[net452, netstandard2.0]* - Provides a serializer and deserializer for working with Avro serialized data with Confluent Schema Registry integration.
+- [Confluent.SchemaRegistry](https://www.nuget.org/packages/Confluent.SchemaRegistry/) *[net452, netstandard1.4]* - Confluent Schema Registry client (a dependency of Confluent.SchemaRegistry.Serdes).
 
 To install Confluent.Kafka from within Visual Studio, search for Confluent.Kafka in the NuGet Package Manager UI, or run the following command in the Package Manager Console:
 
 ```
-Install-Package Confluent.Kafka -Version 1.0-beta2
+Install-Package Confluent.Kafka -Version 1.0.0-beta3
 ```
 
 To add a reference to a dotnet core project, execute the following at the command line:
 
 ```
-dotnet add package -v 1.0-beta2 Confluent.Kafka
+dotnet add package -v 1.0.0-beta3 Confluent.Kafka
 ```
 
-**Note:** We recommend using the `1.0-beta2` version of Confluent.Kafka for new projects in preference to the most recent stable release (0.11.5).
+**Note:** We recommend using the `1.0.0-beta3` version of Confluent.Kafka for new projects in preference to the most recent stable release (0.11.6).
 The 1.0 API provides more features, is considerably improved and is more performant than 0.11.x releases. In choosing the label 'beta',
 we are signaling that we do not anticipate making any high impact changes to the API before the 1.0 release, however be warned that some 
 breaking changes are still planned. You can track progress and provide feedback on the new 1.0 API
@@ -90,15 +90,17 @@ class Program
     {
         var config = new ProducerConfig { BootstrapServers = "localhost:9092" };
 
-        // A Producer for sending messages with null keys and UTF-8 encoded values.
-        using (var p = new Producer<Null, string>(config))
+        // If serializers are not specified, default serializers from
+        // `Confluent.Kafka.Serializers` will be automatically used where
+        // available. Note: by default strings are encoded as UTF8.
+        using (var p = new ProducerBuilder<Null, string>(config).Build())
         {
             try
             {
                 var dr = await p.ProduceAsync("test-topic", new Message<Null, string> { Value="test" });
                 Console.WriteLine($"Delivered '{dr.Value}' to '{dr.TopicPartitionOffset}'");
             }
-            catch (KafkaException e)
+            catch (ProduceException<Null, string> e)
             {
                 Console.WriteLine($"Delivery failed: {e.Error.Reason}");
             }
@@ -123,12 +125,12 @@ class Program
     {
         var conf = new ProducerConfig { BootstrapServers = "localhost:9092" };
 
-        Action<DeliveryReportResult<Null, string>> handler = r => 
+        Action<DeliveryReport<Null, string>> handler = r => 
             Console.WriteLine(!r.Error.IsError
                 ? $"Delivered message to {r.TopicPartitionOffset}"
                 : $"Delivery Error: {r.Error.Reason}");
 
-        using (var p = new Producer<Null, string>(conf))
+        using (var p = new ProducerBuilder<Null, string>(conf).Build())
         {
             for (int i=0; i<100; ++i)
             {
@@ -146,6 +148,7 @@ class Program
 
 ```csharp
 using System;
+using System.Threading;
 using Confluent.Kafka;
 
 class Program
@@ -161,33 +164,39 @@ class Program
             // topic/partitions of interest. By default, offsets are committed
             // automatically, so in this example, consumption will only start from the
             // earliest message in the topic 'my-topic' the first time you run the program.
-            AutoOffsetReset = AutoOffsetResetType.Earliest
+            AutoOffsetReset = AutoOffsetReset.Earliest
         };
 
-        using (var c = new Consumer<Ignore, string>(conf))
+        using (var c = new ConsumerBuilder<Ignore, string>(conf).Build())
         {
             c.Subscribe("my-topic");
 
-            bool consuming = true;
-            // The client will automatically recover from non-fatal errors. You typically
-            // don't need to take any action unless an error is marked as fatal.
-            c.OnError += (_, e) => consuming = !e.IsFatal;
+            CancellationTokenSource cts = new CancellationTokenSource();
+            Console.CancelKeyPress += (_, e) => {
+                e.Cancel = true; // prevent the process from terminating.
+                cts.Cancel();
+            };
 
-            while (consuming)
+            try
             {
-                try
+                while (true)
                 {
-                    var cr = c.Consume();
-                    Console.WriteLine($"Consumed message '{cr.Value}' at: '{cr.TopicPartitionOffset}'.");
-                }
-                catch (ConsumeException e)
-                {
-                    Console.WriteLine($"Error occured: {e.Error.Reason}");
+                    try
+                    {
+                        var cr = c.Consume(cts.Token);
+                        Console.WriteLine($"Consumed message '{cr.Value}' at: '{cr.TopicPartitionOffset}'.");
+                    }
+                    catch (ConsumeException e)
+                    {
+                        Console.WriteLine($"Error occured: {e.Error.Reason}");
+                    }
                 }
             }
-            
-            // Ensure the consumer leaves the group cleanly and final offsets are committed.
-            c.Close();
+            catch (OperationCanceledException)
+            {
+                // Ensure the consumer leaves the group cleanly and final offsets are committed.
+                c.Close();
+            }
         }
     }
 }
@@ -195,7 +204,7 @@ class Program
 
 ### Working with Apache Avro
 
-The `Confluent.Kafka.Avro` nuget package provides an Avro serializer and deserializer that integrate with [Confluent
+The `Confluent.SchemaRegistry.Serdes` nuget package provides an Avro serializer and deserializer that integrate with [Confluent
 Schema Registry](https://docs.confluent.io/current/schema-registry/docs/index.html). The `Confluent.SchemaRegistry` 
 nuget package provides a client for interfacing with Schema Registry's REST API.
 
@@ -215,9 +224,37 @@ avrogen -s your_schema.asvc .
 For more information about working with Avro in .NET, refer to the the blog post [Decoupling Systems with Apache Kafka, Schema Registry and Avro](https://www.confluent.io/blog/decoupling-systems-with-apache-kafka-schema-registry-and-avro/)
 
 
+### Error Handling
+
+Errors delivered to a client's error handler should be considered informational except when the `IsFatal` flag
+is set to `true`, indicating that the client is in an un-recoverable state. Currently, this can only happen on
+the producer, and only when `enable.idempotence` has been set to `true`. In all other scenarios, clients will
+attempt to recover from all errors automatically.
+
+Although calling most methods on the clients will result in a fatal error if the client is in an un-recoverable
+state, you should generally only need to explicitly check for fatal errors in your error handler, and handle
+this scenario there.
+
+#### Producer
+
+When using `BeginProduce`, to determine whether a particular message has been successfully delivered to a cluster,
+check the `Error` field of the `DeliveryReport` during the delivery handler callback.
+
+When using `ProduceAsync`, any delivery result other than `NoError` will cause the returned `Task` to be in the
+faulted state, with the `Task.Exception` field set to a `ProduceException` containing information about the message
+and error via the `DeliveryResult` and `Error` fields. Note: if you `await` the call, this means a `ProduceException`
+will be thrown.
+
+#### Consumer
+
+All `Consume` errors will result in a `ConsumeException` with further information about the error and context
+available via the `Error` and `ConsumeResult` fields.
+
+
 ### Confluent Cloud
 
-The [Confluent Cloud example](examples/ConfluentCloud) demonstrates how to configure the .NET client for use with [Confluent Cloud](https://www.confluent.io/confluent-cloud/).
+The [Confluent Cloud example](examples/ConfluentCloud) demonstrates how to configure the .NET client for use with
+[Confluent Cloud](https://www.confluent.io/confluent-cloud/).
 
 
 ## Build

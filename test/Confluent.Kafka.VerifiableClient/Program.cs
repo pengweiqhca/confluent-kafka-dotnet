@@ -144,7 +144,7 @@ namespace Confluent.Kafka.VerifiableClient
 
     public class VerifiableProducer : VerifiableClient, IDisposable
     {
-        Producer<Null, string> Handle; // Client Handle
+        IProducer<byte[], byte[]> Handle; // Client Handle
 
         long DeliveryCnt; // Successfully delivered messages
         long ErrCnt; // Failed deliveries
@@ -158,7 +158,7 @@ namespace Confluent.Kafka.VerifiableClient
         {
             Config = clientConfig;
             var producerConfig = new ProducerConfig(Config.Conf.ToDictionary(a => a.Key, a => a.Value.ToString()));
-            Handle = new Producer<Null, string>(producerConfig);
+            Handle = new ProducerBuilder<byte[], byte[]>(producerConfig).Build();
             ProduceLock = new object();
             Dbg("Created producer " + Handle.Name);
         }
@@ -172,14 +172,12 @@ namespace Confluent.Kafka.VerifiableClient
             }
         }
 
-        public void HandleDelivery(DeliveryReportResult<Null, string> record)
+        public void HandleDelivery(DeliveryReport<byte[], byte[]> record)
         {
             var d = new Dictionary<string, object>
             {
                 { "topic", record.Topic },
-                { "partition", record.TopicPartition.Partition.ToString() },
-                { "key", $"{record.Message.Key}" }, // always Null
-                { "value", $"{record.Message.Value}" }
+                { "partition", record.TopicPartition.Partition.ToString() }
             };
 
             if (record.Error.IsError)
@@ -209,14 +207,7 @@ namespace Confluent.Kafka.VerifiableClient
 
         private void Produce(string topic, string value)
         {
-            try
-            {
-                Handle.BeginProduce(topic, new Message<Null, string> { Value = value }, record => HandleDelivery(record));
-            }
-            catch (KafkaException e)
-            {
-                Fatal($"Produce({topic}, {value}) failed: {e}");
-            }
+            Handle.BeginProduce(topic, new Message<byte[], byte[]> { Value = Encoding.UTF8.GetBytes(value) }, record => HandleDelivery(record));
         }
 
         private void TimedProduce(object ignore)
@@ -287,7 +278,7 @@ namespace Confluent.Kafka.VerifiableClient
 
     public class VerifiableConsumer : VerifiableClient, IDisposable
     {
-        Consumer<Null, string> consumer;
+        IConsumer<Null, string> consumer;
         VerifiableConsumerConfig Config;
 
         private Dictionary<TopicPartition, AssignedPartition> currentAssignment;
@@ -311,13 +302,26 @@ namespace Confluent.Kafka.VerifiableClient
             }
         };
 
-
         public VerifiableConsumer(VerifiableConsumerConfig clientConfig)
         {
             Config = clientConfig;
             Config.Conf["enable.auto.commit"] = Config.AutoCommit;
             var consumerConfig = new ConsumerConfig(Config.Conf.ToDictionary(a => a.Key, a => a.Value.ToString()));
-            consumer = new Consumer<Null, string>(consumerConfig);
+            consumer = new ConsumerBuilder<Null, string>(consumerConfig)
+                .SetRebalanceHandler((_, e) =>
+                {
+                    if (e.IsAssignment)
+                    {
+                        HandleAssign(e.Partitions);
+                    }
+                    else
+                    {
+                        HandleRevoke(e.Partitions);
+                    }
+                })
+                .SetOffsetsCommittedHandler((_, offsets) => SendOffsetsCommitted(offsets))
+                .Build();
+
             consumedMsgsAtLastCommit = 0;
             Dbg($"Created Consumer {consumer.Name} with AutoCommit={Config.AutoCommit}");
         }
@@ -477,16 +481,16 @@ namespace Confluent.Kafka.VerifiableClient
             {
                 results = consumer.Commit().Select(r => new TopicPartitionOffsetError(r, new Error(ErrorCode.NoError))).ToList();
             }
+            catch (TopicPartitionOffsetException ex)
+            {
+                results = ex.Results;
+            }
             catch (KafkaException ex)
             {
                 results = null;
                 error = ex.Error;
             }
-            catch (TopicPartitionOffsetException ex)
-            {
-                results = ex.Results;
-            }
-
+            
             SendOffsetsCommitted(new CommittedOffsets(results, error));
         }
 
@@ -607,16 +611,6 @@ namespace Confluent.Kafka.VerifiableClient
         public override void Run()
         {
             Send("startup_complete", new Dictionary<string, object>());
-
-            consumer.OnPartitionsAssigned += (_, partitions)
-                => HandleAssign(partitions);
-
-            consumer.OnPartitionsRevoked += (_, partitions)
-                => HandleRevoke(partitions);
-
-            // Only used when auto-commits enabled
-            consumer.OnOffsetsCommitted += (_, offsets)
-                => SendOffsetsCommitted(offsets);
 
             consumer.Subscribe(Config.Topic);
 

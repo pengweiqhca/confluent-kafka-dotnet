@@ -18,6 +18,7 @@ using System;
 using System.Text;
 using System.Collections.Generic;
 using Xunit;
+using Confluent.Kafka.Admin;
 
 
 namespace Confluent.Kafka.IntegrationTests
@@ -30,7 +31,7 @@ namespace Confluent.Kafka.IntegrationTests
         /// <returns>
         ///     The offset of the first produced message.
         /// </returns>
-        public static TopicPartitionOffset ProduceMessages(string bootstrapServers, string topic, int size, int number)
+        public static TopicPartitionOffset ProduceNullStringMessages(string bootstrapServers, string topic, int size, int number)
         {
             var producerConfig = new ProducerConfig { BootstrapServers = bootstrapServers };
             
@@ -42,8 +43,8 @@ namespace Confluent.Kafka.IntegrationTests
             }
             var msg = sb.ToString();
 
-            DeliveryReport<Null, string> firstDeliveryReport = null;
-            using (var producer = new Producer<Null, string>(producerConfig))
+            DeliveryResult<Null, string> firstDeliveryReport = null;
+            using (var producer = new ProducerBuilder<Null, string>(producerConfig).Build())
             {
                 for (int i=0; i<number; ++i)
                 {

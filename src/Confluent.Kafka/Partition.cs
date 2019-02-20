@@ -49,7 +49,7 @@ namespace Confluent.Kafka
         }
 
         /// <summary>
-        ///     Gets the long value corresponding to this partition.
+        ///     Gets the int value corresponding to this partition.
         /// </summary>
         public int Value { get; }
 

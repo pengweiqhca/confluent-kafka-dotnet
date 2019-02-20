@@ -16,6 +16,7 @@
 
 #pragma warning disable xUnit1026
 
+using Confluent.Kafka.Serdes;
 using System;
 using System.Text;
 using System.Collections.Generic;
@@ -49,27 +50,42 @@ namespace Confluent.Kafka.IntegrationTests
                 Debug = "all"
             };
 
-            DeliveryReport<Null, string> dr;
-
-            using (var producer = new Producer<Null, string>(producerConfig))
+            var adminConfig = new AdminClientConfig
             {
-                producer.OnLog += (_, m)
-                    => logCount += 1;
+                BootstrapServers = bootstrapServers,
+                Debug = "all"
+            };
 
-                dr = producer.ProduceAsync(singlePartitionTopic, new Message<Null, string> { Value = "test value" }).Result;
+            DeliveryResult<byte[], byte[]> dr;
+
+            using (var producer =
+                new ProducerBuilder<byte[], byte[]>(producerConfig)
+                    .SetLogHandler((_, m) => logCount += 1)
+                    .Build())
+            {
+                dr = producer.ProduceAsync(singlePartitionTopic, new Message<byte[], byte[]> { Value = Serializers.Utf8.Serialize("test value", true, null, null) }).Result;
                 producer.Flush(TimeSpan.FromSeconds(10));
             }
             Assert.True(logCount > 0);
 
             logCount = 0;
-            using (var consumer = new Consumer<Null, string>(consumerConfig))
+            using (var consumer =
+                new ConsumerBuilder<byte[], byte[]>(consumerConfig)
+                    .SetLogHandler((_, m) => logCount += 1)
+                    .Build())
             {
-                consumer.OnLog += (_, m)
-                    => logCount += 1;
-
                 consumer.Assign(new TopicPartition(singlePartitionTopic, 0));
-                
-                consumer.Consume(TimeSpan.FromMilliseconds(100));
+                consumer.Consume(TimeSpan.FromSeconds(10));
+            }
+            Assert.True(logCount > 0);
+
+            logCount = 0;
+            using (var adminClient =
+                new AdminClientBuilder(adminConfig)
+                    .SetLogHandler((_, m) => logCount += 1)
+                    .Build())
+            {
+                adminClient.GetMetadata(TimeSpan.FromSeconds(1));
             }
             Assert.True(logCount > 0);
 

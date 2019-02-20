@@ -19,9 +19,11 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text;
 using System.Threading.Tasks;
+using System.Text;
 using Xunit;
+using Confluent.Kafka.Serdes;
+
 
 namespace Confluent.Kafka.IntegrationTests
 {
@@ -39,41 +41,45 @@ namespace Confluent.Kafka.IntegrationTests
             {
                 GroupId = Guid.NewGuid().ToString(),
                 BootstrapServers = bootstrapServers,
-                AutoOffsetReset = AutoOffsetResetType.Latest
+                AutoOffsetReset = AutoOffsetReset.Latest
             };
 
             var producerConfig = new ProducerConfig { BootstrapServers = bootstrapServers };
 
-            using (var producer = new Producer<Null, string>(producerConfig))
-            using (var consumer = new Consumer<Null, string>(consumerConfig))
+            IEnumerable<TopicPartition> assignment = null;
+
+            using (var producer = new ProducerBuilder<byte[], byte[]>(producerConfig).Build())
+            using (var consumer =
+                new ConsumerBuilder<byte[], byte[]>(consumerConfig)
+                    .SetRebalanceHandler((c, e) =>
+                    {
+                        if (e.IsAssignment)
+                        {
+                            c.Assign(e.Partitions);
+                            assignment = e.Partitions;
+                        }
+                    })
+                    .Build())
             {
-                IEnumerable<TopicPartition> assignedPartitions = null;
-                ConsumeResult<Null, string> record;
-
-                consumer.OnPartitionsAssigned += (_, partitions) =>
-                {
-                    consumer.Assign(partitions);
-                    assignedPartitions = partitions;
-                };
-
                 consumer.Subscribe(singlePartitionTopic);
 
-                while (assignedPartitions == null)
+                while (assignment == null)
                 {
-                    consumer.Consume(TimeSpan.FromSeconds(1));
+                    consumer.Consume(TimeSpan.FromSeconds(10));
                 }
-                record = consumer.Consume(TimeSpan.FromSeconds(1));
+
+                ConsumeResult<byte[], byte[]> record = consumer.Consume(TimeSpan.FromSeconds(10));
                 Assert.Null(record);
 
-                producer.ProduceAsync(singlePartitionTopic, new Message<Null, string> { Value = "test value" }).Wait();
-                record = consumer.Consume(TimeSpan.FromSeconds(30));
+                producer.ProduceAsync(singlePartitionTopic, new Message<byte[], byte[]> { Value = Serializers.Utf8.Serialize("test value", true, null, null) }).Wait();
+                record = consumer.Consume(TimeSpan.FromSeconds(10));
                 Assert.NotNull(record?.Message);
 
-                consumer.Pause(assignedPartitions);
-                producer.ProduceAsync(singlePartitionTopic, new Message<Null, string> { Value = "test value 2" }).Wait();
-                record = consumer.Consume(TimeSpan.FromSeconds(2));
+                consumer.Pause(assignment);
+                producer.ProduceAsync(singlePartitionTopic, new Message<byte[], byte[]> { Value = Serializers.Utf8.Serialize("test value 2", true, null, null) }).Wait();
+                record = consumer.Consume(TimeSpan.FromSeconds(10));
                 Assert.Null(record);
-                consumer.Resume(assignedPartitions);
+                consumer.Resume(assignment);
                 record = consumer.Consume(TimeSpan.FromSeconds(10));
                 Assert.NotNull(record?.Message);
 

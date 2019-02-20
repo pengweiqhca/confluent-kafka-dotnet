@@ -15,12 +15,8 @@
 // Refer to LICENSE for more information.
 
 using System;
-using System.Linq;
 using System.Collections.Generic;
 using System.Threading;
-using System.Threading.Tasks;
-using Confluent.Kafka.Impl;
-using Confluent.Kafka.Internal;
 
 
 namespace Confluent.Kafka
@@ -32,10 +28,9 @@ namespace Confluent.Kafka
     public interface IConsumer<TKey, TValue> : IClient
     {
         /// <summary>
-        ///     Refer to <see cref="Confluent.Kafka.Consumer{TKey, TValue}.MemberId" />
+        ///     Refer to <see cref="Confluent.Kafka.Consumer{TKey, TValue}.Consume(CancellationToken)" />
         /// </summary>
-        /// <value></value>
-        string MemberId { get; }
+        ConsumeResult<TKey, TValue> Consume(CancellationToken cancellationToken = default(CancellationToken));
 
 
         /// <summary>
@@ -45,155 +40,141 @@ namespace Confluent.Kafka
 
 
         /// <summary>
-        ///     Refer to <see cref="Confluent.Kafka.Consumer{TKey, TValue}.Consume(CancellationToken)" />
+        ///     Refer to <see cref="Confluent.Kafka.Consumer{TKey,TValue}.MemberId" />
         /// </summary>
-        ConsumeResult<TKey, TValue> Consume(CancellationToken cancellationToken);
+        string MemberId { get; }
 
 
         /// <summary>
-        ///     Refer to <see cref="Confluent.Kafka.Consumer{TKey, TValue}.OnPartitionsAssigned" />
-        /// </summary>
-        event EventHandler<List<TopicPartition>> OnPartitionsAssigned;
-
-
-        /// <summary>
-        ///     Refer to <see cref="Confluent.Kafka.Consumer{TKey, TValue}.OnPartitionsRevoked" />
-        /// </summary>
-        event EventHandler<List<TopicPartition>> OnPartitionsRevoked;
-
-
-        /// <summary>
-        ///     Refer to <see cref="Confluent.Kafka.Consumer{TKey, TValue}.OnOffsetsCommitted" />
-        /// </summary>
-        event EventHandler<CommittedOffsets> OnOffsetsCommitted;
-
-
-        /// <summary>
-        ///     Refer to <see cref="Confluent.Kafka.Consumer{TKey, TValue}.Assignment" />
+        ///     Refer to <see cref="Confluent.Kafka.Consumer{TKey,TValue}.Assignment" />
         /// </summary>
         List<TopicPartition> Assignment { get; }
 
 
         /// <summary>
-        ///     Refer to <see cref="Confluent.Kafka.Consumer{TKey, TValue}.Subscription" />
+        ///     Refer to <see cref="Confluent.Kafka.Consumer{TKey,TValue}.Subscription" />
         /// </summary>
         List<string> Subscription { get; }
 
 
         /// <summary>
-        ///     Refer to <see cref="Confluent.Kafka.Consumer{TKey, TValue}.Subscribe(IEnumerable{string})" />
+        ///     Refer to <see cref="Confluent.Kafka.Consumer{TKey,TValue}.Subscribe(IEnumerable{string})" />
         /// </summary>
         void Subscribe(IEnumerable<string> topics);
 
 
         /// <summary>
-        ///     Refer to <see cref="Confluent.Kafka.Consumer{TKey, TValue}.Subscribe(string)" />
+        ///     Refer to <see cref="Confluent.Kafka.Consumer{TKey,TValue}.Subscribe(string)" />
         /// </summary>
         /// <param name="topic"></param>
         void Subscribe(string topic);
         
 
         /// <summary>
-        ///     Refer to <see cref="Confluent.Kafka.Consumer{TKey, TValue}.Unsubscribe" />
+        ///     Refer to <see cref="Confluent.Kafka.Consumer{TKey,TValue}.Unsubscribe" />
         /// </summary>
         void Unsubscribe();
 
 
         /// <summary>
-        ///     Refer to <see cref="Confluent.Kafka.Consumer{TKey, TValue}.Assign(TopicPartition)" />
+        ///     Refer to <see cref="Confluent.Kafka.Consumer{TKey,TValue}.Assign(TopicPartition)" />
         /// </summary>
-        /// <param name="partition"></param>
         void Assign(TopicPartition partition);
 
 
         /// <summary>
-        ///     Refer to <see cref="Confluent.Kafka.Consumer{TKey, TValue}.Assign(TopicPartitionOffset)" />
+        ///     Refer to <see cref="Confluent.Kafka.Consumer{TKey,TValue}.Assign(TopicPartitionOffset)" />
         /// </summary>
-        /// <param name="partition"></param>
         void Assign(TopicPartitionOffset partition);
 
 
         /// <summary>
-        ///     Refer to <see cref="Confluent.Kafka.Consumer{TKey, TValue}.Assign(IEnumerable{TopicPartitionOffset})" />
+        ///     Refer to <see cref="Confluent.Kafka.Consumer{TKey,TValue}.Assign(IEnumerable{TopicPartitionOffset})" />
         /// </summary>
         void Assign(IEnumerable<TopicPartitionOffset> partitions);
 
 
         /// <summary>
-        ///     Refer to <see cref="Confluent.Kafka.Consumer{TKey, TValue}.Assign(TopicPartition)" />
+        ///     Refer to <see cref="Confluent.Kafka.Consumer{TKey,TValue}.Assign(TopicPartition)" />
         /// </summary>
         void Assign(IEnumerable<TopicPartition> partitions);
 
 
         /// <summary>
-        ///     Refer to <see cref="Confluent.Kafka.Consumer{TKey, TValue}.Unassign" />
+        ///     Refer to <see cref="Confluent.Kafka.Consumer{TKey,TValue}.Unassign" />
         /// </summary>
         void Unassign();
 
 
         /// <summary>
-        ///     Refer to <see cref="Confluent.Kafka.Consumer{TKey, TValue}.StoreOffset(ConsumeResult{TKey, TValue})" />
+        ///     Refer to <see cref="Confluent.Kafka.Consumer{TKey,TValue}.StoreOffset(ConsumeResult{TKey, TValue})" />
         /// </summary>
         void StoreOffset(ConsumeResult<TKey, TValue> result);
 
 
         /// <summary>
-        ///     Refer to <see cref="Confluent.Kafka.Consumer{TKey, TValue}.StoreOffsets(IEnumerable{TopicPartitionOffset})" />
+        ///     Refer to <see cref="Confluent.Kafka.Consumer{TKey,TValue}.StoreOffsets(IEnumerable{TopicPartitionOffset})" />
         /// </summary>
         void StoreOffsets(IEnumerable<TopicPartitionOffset> offsets);
 
 
         /// <summary>
-        ///     Refer to <see cref="Confluent.Kafka.Consumer{TKey, TValue}.Commit(CancellationToken)" />
+        ///     Refer to <see cref="Confluent.Kafka.Consumer{TKey,TValue}.Commit()" />
         /// </summary>
-        List<TopicPartitionOffset> Commit(CancellationToken cancellationToken = default(CancellationToken));
+        List<TopicPartitionOffset> Commit();
 
 
         /// <summary>
-        ///     Refer to <see cref="Confluent.Kafka.Consumer{TKey, TValue}.Commit(ConsumeResult{TKey, TValue}, CancellationToken)" />
+        ///     Refer to <see cref="Confluent.Kafka.Consumer{TKey,TValue}.Commit(IEnumerable{TopicPartitionOffset})" />
         /// </summary>
-        TopicPartitionOffset Commit(ConsumeResult<TKey, TValue> result, CancellationToken cancellationToken = default(CancellationToken));
+        void Commit(IEnumerable<TopicPartitionOffset> offsets);
 
 
         /// <summary>
-        ///     Refer to <see cref="Confluent.Kafka.Consumer{TKey, TValue}.Commit(IEnumerable{TopicPartitionOffset}, CancellationToken)" />
+        ///     Refer to <see cref="Confluent.Kafka.Consumer{TKey,TValue}.Commit(ConsumeResult{TKey, TValue})" />
         /// </summary>
-        void Commit(IEnumerable<TopicPartitionOffset> offsets, CancellationToken cancellationToken = default(CancellationToken));
+        void Commit(ConsumeResult<TKey, TValue> result);
 
 
         /// <summary>
-        ///     Refer to <see cref="Confluent.Kafka.Consumer{TKey, TValue}.Seek(TopicPartitionOffset)" />
+        ///     Refer to <see cref="Confluent.Kafka.Consumer{TKey,TValue}.Seek(TopicPartitionOffset)" />
         /// </summary>
         void Seek(TopicPartitionOffset tpo);
 
 
         /// <summary>
-        ///     Refer to <see cref="Confluent.Kafka.Consumer{TKey, TValue}.Pause(IEnumerable{TopicPartition})" />
+        ///     Refer to <see cref="Confluent.Kafka.Consumer{TKey,TValue}.Pause(IEnumerable{TopicPartition})" />
         /// </summary>
         void Pause(IEnumerable<TopicPartition> partitions);
 
 
         /// <summary>
-        ///     Refer to <see cref="Confluent.Kafka.Consumer{TKey, TValue}.Resume(IEnumerable{TopicPartition})" />
+        ///     Refer to <see cref="Confluent.Kafka.Consumer{TKey,TValue}.Resume(IEnumerable{TopicPartition})" />
         /// </summary>
         void Resume(IEnumerable<TopicPartition> partitions);
 
 
         /// <summary>
-        ///     Refer to <see cref="Confluent.Kafka.Consumer{TKey, TValue}.Committed(IEnumerable{TopicPartition}, TimeSpan, CancellationToken)" />
+        ///     Refer to <see cref="Confluent.Kafka.Consumer{TKey,TValue}.Committed(IEnumerable{TopicPartition}, TimeSpan)" />
         /// </summary>
-        List<TopicPartitionOffset> Committed(IEnumerable<TopicPartition> partitions, TimeSpan timeout, CancellationToken cancellationToken = default(CancellationToken));
+        List<TopicPartitionOffset> Committed(IEnumerable<TopicPartition> partitions, TimeSpan timeout);
 
 
         /// <summary>
-        ///     Refer to <see cref="Confluent.Kafka.Consumer{TKey, TValue}.Position(IEnumerable{TopicPartition})" />
+        ///     Refer to <see cref="Confluent.Kafka.Consumer{TKey,TValue}.Position(IEnumerable{TopicPartition})" />
         /// </summary>
         List<TopicPartitionOffset> Position(IEnumerable<TopicPartition> partitions);
 
 
         /// <summary>
-        ///     Refer to <see cref="Confluent.Kafka.Consumer{TKey, TValue}.OffsetsForTimes(IEnumerable{TopicPartitionTimestamp}, TimeSpan, CancellationToken)" />
+        ///     Refer to <see cref="Confluent.Kafka.Consumer{TKey,TValue}.OffsetsForTimes(IEnumerable{TopicPartitionTimestamp}, TimeSpan)" />
         /// </summary>
-        List<TopicPartitionOffset> OffsetsForTimes(IEnumerable<TopicPartitionTimestamp> timestampsToSearch, TimeSpan timeout, CancellationToken cancellationToken = default(CancellationToken));
+        List<TopicPartitionOffset> OffsetsForTimes(IEnumerable<TopicPartitionTimestamp> timestampsToSearch, TimeSpan timeout);
+
+
+        /// <summary>
+        ///     Refer to <see cref="Confluent.Kafka.Consumer{TKey,TValue}.Close" />.
+        /// </summary>
+        void Close();
     }
 }

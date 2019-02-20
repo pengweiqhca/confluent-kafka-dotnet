@@ -16,15 +16,15 @@
 //
 // Refer to LICENSE for more information.
 
+using Confluent.Kafka;
 using System;
 using System.IO;
 using System.Text;
 using System.Threading.Tasks;
 using System.Collections.Generic;
-using Confluent.Kafka;
 
 
-namespace Confluent.Kafka.Examples.Producer
+namespace Confluent.Kafka.Examples.ProducerExample
 {
     public class Program
     {
@@ -41,7 +41,7 @@ namespace Confluent.Kafka.Examples.Producer
 
             var config = new ProducerConfig { BootstrapServers = brokerList };
 
-            using (var producer = new Producer<string, string>(config))
+            using (var producer = new ProducerBuilder<string, string>(config).Build())
             {
                 Console.WriteLine("\n-----------------------------------------------------------------------");
                 Console.WriteLine($"Producer {producer.Name} producing on topic {topicName}.");
@@ -92,12 +92,15 @@ namespace Confluent.Kafka.Examples.Producer
 
                     try
                     {
-                        // Awaiting the asynchronous produce request below prevents flow of execution
-                        // from proceeding until the acknowledgement from the broker is received.
-                        var deliveryReport = await producer.ProduceAsync(topicName, new Message<string, string> { Key = key, Value = val });
+                        // Notes: Awaiting the asynchronous produce request below prevents flow of execution
+                        // from proceeding until the acknowledgement from the broker is received (at the 
+                        // expense of low throughput).
+                        var deliveryReport = await producer.ProduceAsync(
+                            topicName, new Message<string, string> { Key = key, Value = val });
+
                         Console.WriteLine($"delivered to: {deliveryReport.TopicPartitionOffset}");
                     }
-                    catch (KafkaException e)
+                    catch (ProduceException<string, string> e)
                     {
                         Console.WriteLine($"failed to deliver message: {e.Message} [{e.Error.Code}]");
                     }

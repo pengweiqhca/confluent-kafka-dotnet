@@ -42,8 +42,8 @@ namespace Confluent.Kafka.IntegrationTests
 
             var producerConfig = new ProducerConfig { BootstrapServers = bootstrapServers };
 
-            DeliveryReport<byte[], byte[]> dr;
-            using (var producer = new Producer<byte[], byte[]>(producerConfig))
+            DeliveryResult<byte[], byte[]> dr;
+            using (var producer = new ProducerBuilder<byte[], byte[]>(producerConfig).Build())
             {
                 // Assume that all these produce calls succeed.
                 dr = producer.ProduceAsync(new TopicPartition(singlePartitionTopic, 0), new Message<byte[], byte[]> { Key = null, Value = null }).Result;
@@ -53,26 +53,26 @@ namespace Confluent.Kafka.IntegrationTests
                 producer.Flush(TimeSpan.FromSeconds(10));
             }
 
-            using (var consumer = new Consumer<byte[], byte[]>(consumerConfig))
+            using (var consumer = new ConsumerBuilder<byte[], byte[]>(consumerConfig).Build())
             {
                 consumer.Assign(new List<TopicPartitionOffset>() { dr.TopicPartitionOffset });
 
-                var record = consumer.Consume(TimeSpan.FromMinutes(1));
+                var record = consumer.Consume(TimeSpan.FromSeconds(10));
                 Assert.NotNull(record.Message);
                 Assert.Null(record.Message.Key);
                 Assert.Null(record.Message.Value);
 
-                record = consumer.Consume(TimeSpan.FromMinutes(1));
+                record = consumer.Consume(TimeSpan.FromSeconds(10));
                 Assert.NotNull(record.Message);
                 Assert.Null(record.Message.Key);
                 Assert.Equal(record.Message.Value, new byte[0]);
 
-                record = consumer.Consume(TimeSpan.FromMinutes(1));
+                record = consumer.Consume(TimeSpan.FromSeconds(10));
                 Assert.NotNull(record.Message);
                 Assert.Equal(record.Message.Key, new byte[0]);
                 Assert.Null(record.Message.Value);
 
-                record = consumer.Consume(TimeSpan.FromMinutes(1));
+                record = consumer.Consume(TimeSpan.FromSeconds(10));
                 Assert.NotNull(record.Message);
                 Assert.Equal(record.Message.Key, new byte[0]);
                 Assert.Equal(record.Message.Value, new byte[0]);

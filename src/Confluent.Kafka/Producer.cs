@@ -1,4 +1,4 @@
-// Copyright 2016-2018 Confluent Inc., 2015-2016 Andreas Heider
+// Copyright 2016-2018 Confluent Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,17 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 //
-// Derived from: rdkafka-dotnet, licensed under the 2-clause BSD License.
-//
 // Refer to LICENSE for more information.
 
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
+using Confluent.Kafka.Serdes;
 using Confluent.Kafka.Impl;
 using Confluent.Kafka.Internal;
 
@@ -30,789 +28,57 @@ using Confluent.Kafka.Internal;
 namespace Confluent.Kafka
 {
     /// <summary>
-    ///     A serializer for use with <see cref="Confluent.Kafka.Producer{TKey, TValue}" />
+    ///     A high level producer with serialization capability.
     /// </summary>
-    /// <param name="topic">
-    ///     The topic the data is being produced to.
-    /// </param>
-    /// <param name="data">
-    ///     The value to serialize.
-    /// </param>
-    /// <returns>
-    ///     The serialized value.
-    /// </returns>
-    public delegate byte[] Serializer<T>(string topic, T data);
-
-    /// <summary>
-    ///     A generator for <see cref="Confluent.Kafka.Serializer{T}" /> instances.
-    /// </summary>
-    /// <param name="forKey">
-    ///     Whether or not the serializer is for use with keys.
-    /// </param>
-    /// <returns>
-    ///     The serializer.
-    /// </returns>
-    public delegate Serializer<T> SerializerGenerator<T>(bool forKey);
-
-    /// <summary>
-    ///     Implements a high-level Apache Kafka producer with key
-    ///     and value serialization.
-    /// </summary>
-    public class Producer<TKey, TValue> : IProducer<TKey, TValue>
+    public class Producer<TKey, TValue> : IProducer<TKey, TValue>, IClient
     {
-        private readonly Producer ownedClient;
-        private readonly Handle handle;
-        private Producer producer;
-        private Serializer<TKey> keySerializer;
-        private Serializer<TValue> valueSerializer;
-
-        private void setAndValidateSerializers(Serializer<TKey> keySerializer, Serializer<TValue> valueSerializer)
+        internal class Config
         {
-            this.keySerializer = keySerializer;
-            this.valueSerializer = valueSerializer;
-
-            if (keySerializer != null && (object)keySerializer == (object)valueSerializer)
-            {
-                throw new ArgumentException("Key and value serializers must not be the same object.");
-            }
-
-            if (keySerializer == null)
-            {
-                if (typeof(TKey) == typeof(Null))
-                {
-                    this.keySerializer = Serializers.Null as Serializer<TKey>;
-                }
-                else if (typeof(TKey) == typeof(byte[]))
-                {
-                    this.keySerializer = Serializers.ByteArray as Serializer<TKey>;
-                }
-                else if (typeof(TKey) == typeof(string))
-                {
-                    this.keySerializer = Serializers.UTF8 as Serializer<TKey>;
-                }
-                else 
-                {
-                    throw new ArgumentNullException("Key serializer must be specified.");
-                }
-            }
-
-            if (valueSerializer == null)
-            {
-                if (typeof(TValue) == typeof(Null))
-                {
-                    this.valueSerializer = Serializers.Null as Serializer<TValue>;
-                }
-                else if (typeof(TValue) == typeof(byte[]))
-                {
-                    this.valueSerializer = Serializers.ByteArray as Serializer<TValue>;
-                }
-                else if (typeof(TValue) == typeof(string))
-                {
-                    this.valueSerializer = Serializers.UTF8 as Serializer<TValue>;
-                }
-                else
-                {
-                    throw new ArgumentNullException("Value serializer must be specified.");
-                }
-            }
+            public IEnumerable<KeyValuePair<string, string>> config;
+            public Action<Error> errorHandler;
+            public Action<LogMessage> logHandler;
+            public Action<string> statisticsHandler;
         }
 
+        private ISerializer<TKey> keySerializer;
+        private ISerializer<TValue> valueSerializer;
+        private IAsyncSerializer<TKey> asyncKeySerializer;
+        private IAsyncSerializer<TValue> asyncValueSerializer;
 
-        /// <summary>
-        ///     Creates a new Producer instance.
-        /// </summary>
-        /// <param name="config">
-        ///     A collection of librdkafka configuration parameters 
-        ///     (refer to https://github.com/edenhill/librdkafka/blob/master/CONFIGURATION.md)
-        ///     and parameters specific to this client (refer to: 
-        ///     <see cref="Confluent.Kafka.ConfigPropertyNames" />).
-        ///     At a minimum, 'bootstrap.servers' must be specified.
-        /// </param>
-        /// <param name="keySerializer">
-        ///     A delegate to use for serialize keys.
-        /// </param>
-        /// <param name="valueSerializer">
-        ///     A delegate to use for serialize values.
-        /// </param>
-        public Producer(
-            IEnumerable<KeyValuePair<string, string>> config,
-            Serializer<TKey> keySerializer = null,
-            Serializer<TValue> valueSerializer = null
-        ) : this(config, (forKey) => keySerializer, (forKey) => valueSerializer) {}
-
-
-        /// <summary>
-        ///     Creates a new Producer instance.
-        /// </summary>
-        /// <param name="config">
-        ///     A collection of librdkafka configuration parameters 
-        ///     (refer to https://github.com/edenhill/librdkafka/blob/master/CONFIGURATION.md)
-        ///     and parameters specific to this client (refer to: 
-        ///     <see cref="Confluent.Kafka.ConfigPropertyNames" />).
-        ///     At a minimum, 'bootstrap.servers' must be specified.
-        /// </param>
-        /// <param name="keySerializerGenerator">
-        ///     A delegate to use to create a delegate for serializing keys.
-        /// </param>
-        /// <param name="valueSerializerGenerator">
-        ///     A delegate to use to create a delegate for serialize values.
-        /// </param>
-        public Producer(
-            IEnumerable<KeyValuePair<string, string>> config,
-            SerializerGenerator<TKey> keySerializerGenerator,
-            SerializerGenerator<TValue> valueSerializerGenerator)
+        private static readonly Dictionary<Type, object> defaultSerializers = new Dictionary<Type, object>
         {
-            this.ownedClient = new Producer(config);
-
-            this.handle = ownedClient.Handle;
-            this.producer = ownedClient;
-            setAndValidateSerializers(
-                keySerializerGenerator == null ? null: keySerializerGenerator(true),
-                valueSerializerGenerator == null ? null : valueSerializerGenerator(false));
-        }
-
-
-        /// <summary>
-        ///     Creates a new Producer instance
-        /// </summary>
-        /// <param name="handle">
-        ///     A librdkafka handle to use for Kafka cluster communication.
-        /// </param>
-        /// <param name="keySerializer">
-        ///     A delegate to use for serialize keys.
-        /// </param>
-        /// <param name="valueSerializer">
-        ///     A delegate to use for serialize values.
-        /// </param>
-        public Producer(
-            Handle handle,
-            Serializer<TKey> keySerializer = null,
-            Serializer<TValue> valueSerializer = null)
-        {
-            if (!(handle.Owner is Producer))
-            {
-                throw new ArgumentException("Handle must be owned by another Producer instance");
-            }
-
-            this.ownedClient = null;
-            this.handle = handle;
-            this.producer = (Producer)handle.Owner;
-            setAndValidateSerializers(keySerializer, valueSerializer);
-        }
-
-
-        /// <summary>
-        ///     Creates a new Producer instance
-        /// </summary>
-        /// <param name="handle">
-        ///     A librdkafka handle to use for Kafka cluster communication.
-        /// </param>
-        /// <param name="keySerializerGenerator">
-        ///     A delegate to use to create a delegate for serializing keys.
-        /// </param>
-        /// <param name="valueSerializerGenerator">
-        ///     A delegate to use to create a delegate for serialize values.
-        /// </param>
-        public Producer(
-            Handle handle,
-            SerializerGenerator<TKey> keySerializerGenerator,
-            SerializerGenerator<TValue> valueSerializerGenerator)
-        {
-            if (!(handle.Owner is Producer))
-            {
-                throw new ArgumentException("Handle must be owned by another Producer instance");
-            }
-
-            this.ownedClient = null;
-            this.handle = handle;
-            this.producer = (Producer)handle.Owner;
-            setAndValidateSerializers(
-                keySerializerGenerator == null ? null : keySerializerGenerator(true),
-                valueSerializerGenerator == null ? null : valueSerializerGenerator(false));
-        }
-
-
-        /// <summary>
-        ///     Refer to <see cref="Confluent.Kafka.IClient.Name" />
-        /// </summary>
-        public string Name
-            => this.handle.Owner.Name;
-
-
-        internal int Flush(int millisecondsTimeout)
-            => ((Producer)this.handle.Owner).Flush(millisecondsTimeout);
-
-
-        /// <summary>
-        ///     Wait until all outstanding produce requests and delivery report
-        ///     callbacks are completed.
-        ///    
-        ///     [API-SUBJECT-TO-CHANGE] - the semantics and/or type of the return value
-        ///     is subject to change.
-        /// </summary>
-        /// <param name="timeout">
-        ///     The maximum length of time to block. You should typically use a
-        ///     relatively short timout period and loop until the return value
-        ///     becomes zero because this operation cannot be cancelled. 
-        /// </param>
-        /// <returns>
-        ///     The current librdkafka out queue length. This should be interpreted
-        ///     as a rough indication of the number of messages waiting to be sent
-        ///     to or acknowledged by the broker. If zero, there are no outstanding
-        ///     messages or callbacks. Specifically, the value is equal to the sum
-        ///     of the number of produced messages for which a delivery report has
-        ///     not yet been handled and a number which is less than or equal to the
-        ///     number of pending delivery report callback events (as determined by
-        ///     the number of outstanding protocol requests).
-        /// </returns>
-        /// <remarks>
-        ///     This method should typically be called prior to destroying a producer
-        ///     instance to make sure all queued and in-flight produce requests are
-        ///     completed before terminating. The wait time is bounded by the
-        ///     timeout parameter.
-        ///    
-        ///     A related configuration parameter is message.timeout.ms which determines
-        ///     the maximum length of time librdkafka attempts to deliver a message 
-        ///     before giving up and so also affects the maximum time a call to Flush 
-        ///     may block.
-        /// </remarks>
-        public int Flush(TimeSpan timeout)
-            => ((Producer)this.handle.Owner).Flush(timeout.TotalMillisecondsAsInt());
-
-
-        /// <summary>
-        ///     Wait until all outstanding produce requests and delivery report
-        ///     callbacks are completed.
-        /// </summary>
-        /// <remarks>
-        ///     This method should typically be called prior to destroying a producer
-        ///     instance to make sure all queued and in-flight produce requests are
-        ///     completed before terminating. 
-        ///    
-        ///     A related configuration parameter is message.timeout.ms which determines
-        ///     the maximum length of time librdkafka attempts to deliver a message 
-        ///     before giving up and so also affects the maximum time a call to Flush 
-        ///     may block.
-        /// </remarks>
-        /// <exception cref="System.OperationCanceledException">
-        ///     Thrown if the operation is cancelled.
-        /// </exception>
-        public void Flush(CancellationToken cancellationToken)
-        {
-            while (true)
-            {
-                int result = Flush(100);
-                if (result == 0)
-                {
-                    return;
-                }
-                if (cancellationToken.IsCancellationRequested)
-                {
-                    // TODO: include flush number in exception.
-                    throw new OperationCanceledException();
-                }
-            }
-        }
-
-
-        internal int Poll(int millisecondsTimeout)
-            => ((Producer)this.handle.Owner).Poll(millisecondsTimeout);
-
-
-        /// <summary>
-        ///     Poll for callback events. Typically, you should not 
-        ///     call this method. Only call on producer instances 
-        ///     where background polling has been disabled.
-        /// </summary>
-        /// <param name="timeout">
-        ///     The maximum period of time to block if no callback events
-        ///     are waiting. You should typically use a relatively short 
-        ///     timout period because this operation cannot be cancelled.
-        /// </param>
-        /// <returns>
-        ///     Returns the number of events served.
-        /// </returns>
-        public int Poll(TimeSpan timeout)
-            => ((Producer)this.handle.Owner).Poll(timeout.TotalMillisecondsAsInt());
-
-
-        /// <summary>
-        ///     Releases all resources used by this Producer. In the current
-        ///     implementation, this method may block for up to 100ms. This 
-        ///     will be replaced with a non-blocking version in the future.
-        /// </summary>
-        /// <remarks>
-        ///     You will often want to call <see cref="Flush(int)" />
-        ///     before disposing a Producer instance to make sure all
-        ///     outstanding/queued messages are delivered.
-        /// </remarks>
-        public void Dispose()
-        {
-            Dispose(true);
-            GC.SuppressFinalize(this);
-        }
-
-
-        /// <summary>
-        ///     Releases the unmanaged resources used by the
-        ///     <see cref="Confluent.Kafka.Producer{TKey, TValue}" />
-        ///     and optionally disposes the managed resources.
-        /// </summary>
-        /// <param name="disposing">
-        ///     true to release both managed and unmanaged resources;
-        ///     false to release only unmanaged resources.
-        /// </param>
-        protected virtual void Dispose(bool disposing)
-        {
-            if (disposing)
-            {
-                if (ownedClient == this.handle.Owner) 
-                {
-                    ownedClient.Dispose();
-                }
-            }
-        }
-
-
-        /// <summary>
-        ///     Refer to <see cref="Confluent.Kafka.IClient.OnLog" />.
-        /// </summary>
-        public event EventHandler<LogMessage> OnLog
-        {
-            add { handle.Owner.OnLog += value; }
-            remove { handle.Owner.OnLog -= value; }
-        }
-
-        /// <summary>
-        ///     Refer to <see cref="Confluent.Kafka.IClient.OnStatistics" />.
-        /// </summary>
-        public event EventHandler<string> OnStatistics
-        {
-            add { handle.Owner.OnStatistics += value; }
-            remove { handle.Owner.OnStatistics -= value; }
-        }
-
-        /// <summary>
-        ///     Refer to <see cref="Confluent.Kafka.IClient.OnError" />.
-        /// </summary>
-        public event EventHandler<ErrorEvent> OnError
-        {
-            add { handle.Owner.OnError += value; }
-            remove { handle.Owner.OnError -= value; }
-        }
-        
-        /// <summary>
-        ///     Refer to <see cref="Confluent.Kafka.IClient.AddBrokers(string)" />
-        /// </summary>
-        public int AddBrokers(string brokers)
-            => this.handle.Owner.AddBrokers(brokers);
-
-
-        /// <summary>
-        ///     An opaque reference to the underlying librdkafka client instance.
-        ///     This can be used to construct an <see cref="Confluent.Kafka.AdminClient" />
-        ///     or <see cref="Confluent.Kafka.Producer{TKey, TValue}" /> instance that
-        ///     utilizes the same underlying librdkafka client as this Producer 
-        ///     instance.
-        /// </summary>
-        public Handle Handle 
-            => handle;
-
-
-        private class TypedTaskDeliveryHandlerShim : TaskCompletionSource<DeliveryReport<TKey, TValue>>, IDeliveryHandler
-        {
-            public TypedTaskDeliveryHandlerShim(string topic, TKey key, TValue val)
-#if !NET45
-                : base(TaskCreationOptions.RunContinuationsAsynchronously)
-#endif
-            {
-                Topic = topic;
-                Key = key;
-                Value = val;
-            }
-
-            public string Topic;
-
-            public TKey Key;
-
-            public TValue Value;
-
-            public void HandleDeliveryReport(Producer.UntypedDeliveryReport deliveryReport)
-            {
-                if (deliveryReport == null)
-                {
-#if NET45
-                    System.Threading.Tasks.Task.Run(() => TrySetResult(null));
-#else
-                    TrySetResult(null);
-#endif
-                    return;
-                }
-
-                var dr = new DeliveryReport<TKey, TValue>
-                {
-                    TopicPartitionOffset = deliveryReport.TopicPartitionOffset,
-                    Message = new Message<TKey, TValue>
-                    {
-                        Key = Key,
-                        Value = Value,
-                        Timestamp = deliveryReport.Message.Timestamp,
-                        Headers = deliveryReport.Message.Headers
-                    }
-                };
-                // topic is cached in this object, not set in the deliveryReport to avoid the 
-                // cost of marshalling it.
-                dr.Topic = Topic;
-
-#if NET45
-                if (deliveryReport.Error.IsError)
-                {
-                    System.Threading.Tasks.Task.Run(() => SetException(new ProduceException<TKey, TValue>(deliveryReport.Error, dr)));
-                }
-                else
-                {
-                    System.Threading.Tasks.Task.Run(() => TrySetResult(dr));
-                }
-#else
-                if (deliveryReport.Error.IsError)
-                {
-                    TrySetException(new ProduceException<TKey, TValue>(deliveryReport.Error, dr));
-                }
-                else
-                {
-                    TrySetResult(dr);
-                }
-#endif
-            }
-        }
-
-
-        private class TypedDeliveryHandlerShim_Action : IDeliveryHandler
-        {
-            public TypedDeliveryHandlerShim_Action(string topic, TKey key, TValue val, Action<DeliveryReportResult<TKey, TValue>> handler)
-            {
-                Topic = topic;
-                Key = key;
-                Value = val;
-                Handler = handler;
-            }
-
-            public string Topic;
-
-            public TKey Key;
-
-            public TValue Value;
-
-            public Action<DeliveryReportResult<TKey, TValue>> Handler;
-
-            public void HandleDeliveryReport(Producer.UntypedDeliveryReport deliveryReport)
-            {
-                if (deliveryReport == null)
-                {
-                    return;
-                }
-
-                var dr = new DeliveryReportResult<TKey, TValue>
-                {
-                    TopicPartitionOffsetError = deliveryReport.TopicPartitionOffsetError,
-                    Message = new Message<TKey, TValue> 
-                    {
-                        Key = Key,
-                        Value = Value,
-                        Timestamp = deliveryReport.Message == null 
-                            ? new Timestamp(0, TimestampType.NotAvailable) 
-                            : deliveryReport.Message.Timestamp,
-                        Headers = deliveryReport.Message?.Headers
-                    }
-                };
-                // topic is cached in this object, not set in the deliveryReport to avoid the 
-                // cost of marshalling it.
-                dr.Topic = Topic;
-
-                if (Handler != null)
-                {
-                    Handler(dr);
-                }
-            }
-        }
-
-
-        /// <summary>
-        ///     Asynchronously send a single message to a Kafka topic.
-        ///     The partition the message is sent to is determined using
-        ///     the partitioner defined using the 'partitioner' 
-        ///     configuration property.
-        /// </summary>
-        /// <param name="topic">
-        ///     The topic to produce the message to.
-        /// </param>
-        /// <param name="message">
-        ///     The message to produce.
-        /// </param>
-        /// <param name="cancellationToken">
-        ///     A cancellation token that can be used to abort this request.
-        /// </param>
-        /// <returns>
-        ///     A Task which will complete with a delivery report corresponding to
-        ///     the produce request, or an exception if an error occured.
-        /// </returns>
-        public Task<DeliveryReport<TKey, TValue>> ProduceAsync(string topic, Message<TKey, TValue> message, CancellationToken cancellationToken = default(CancellationToken))
-        {
-            if (this.producer.enableDeliveryReports)
-            {
-                var handler = new TypedTaskDeliveryHandlerShim(topic,
-                    producer.enableDeliveryReportKey ? message.Key : default(TKey),
-                    producer.enableDeliveryReportValue ? message.Value : default(TValue));
-
-                using (cancellationToken.Register(() => handler.TrySetException(new TaskCanceledException())))
-                {
-                    var keyBytes = keySerializer(topic, message.Key);
-                    var valBytes = valueSerializer(topic, message.Value);
-
-                    producer.ProduceImpl(
-                        topic,
-                        valBytes, 0, valBytes == null ? 0 : valBytes.Length,
-                        keyBytes, 0, keyBytes == null ? 0 : keyBytes.Length,
-                        message.Timestamp, Partition.Any, message.Headers,
-                        handler);
-
-                    return handler.Task;
-                }
-            }
-            else
-            {
-                var keyBytes = keySerializer(topic, message.Key);
-                var valBytes = valueSerializer(topic, message.Value);
-
-                producer.ProduceImpl(
-                    topic,
-                    valBytes, 0, valBytes == null ? 0 : valBytes.Length,
-                    keyBytes, 0, keyBytes == null ? 0 : keyBytes.Length,
-                    message.Timestamp, Partition.Any, message.Headers, 
-                    null);
-
-                var result = new DeliveryReport<TKey, TValue>
-                {
-                    TopicPartitionOffset = new TopicPartitionOffset(new TopicPartition(topic, Partition.Any), Offset.Invalid),
-                    Message = message
-                };
-
-                return Task.FromResult(result);
-            }
-        }
-
-
-        /// <summary>
-        ///     Asynchronously send a single message to a Kafka topic/partition.
-        /// </summary>
-        /// <param name="topicPartition">
-        ///     The topic/partition to produce the message to.
-        /// </param>
-        /// <param name="message">
-        ///     The message to produce.
-        /// </param>
-        /// <param name="cancellationToken">
-        ///     A cancellation token that can be used to abort this request.
-        /// </param>
-        /// <returns>
-        ///     A Task which will complete with a delivery report corresponding to
-        ///     the produce request, or an exception if an error occured.
-        /// </returns>
-        public Task<DeliveryReport<TKey, TValue>> ProduceAsync(TopicPartition topicPartition, Message<TKey, TValue> message, CancellationToken cancellationToken = default(CancellationToken))
-        {
-            if (this.producer.enableDeliveryReports)
-            {
-                var handler = new TypedTaskDeliveryHandlerShim(topicPartition.Topic,
-                    producer.enableDeliveryReportKey ? message.Key : default(TKey),
-                    producer.enableDeliveryReportValue ? message.Value : default(TValue));
-
-                cancellationToken.Register(() => handler.TrySetException(new TaskCanceledException()));
-
-                var keyBytes = keySerializer(topicPartition.Topic, message.Key);
-                var valBytes = valueSerializer(topicPartition.Topic, message.Value);
-                
-                producer.ProduceImpl(
-                    topicPartition.Topic, 
-                    valBytes, 0, valBytes == null ? 0 : valBytes.Length, 
-                    keyBytes, 0, keyBytes == null ? 0 : keyBytes.Length, 
-                    message.Timestamp, topicPartition.Partition, message.Headers, 
-                    handler);
-
-                return handler.Task;
-            }
-            else
-            {
-                var keyBytes = keySerializer(topicPartition.Topic, message.Key);
-                var valBytes = valueSerializer(topicPartition.Topic, message.Value);
-                
-                producer.ProduceImpl(
-                    topicPartition.Topic, 
-                    valBytes, 0, valBytes == null ? 0 : valBytes.Length, 
-                    keyBytes, 0, keyBytes == null ? 0 : keyBytes.Length, 
-                    message.Timestamp, topicPartition.Partition, message.Headers, 
-                    null);
-
-                var result = new DeliveryReport<TKey, TValue>
-                {
-                    TopicPartitionOffset = new TopicPartitionOffset(topicPartition, Offset.Invalid),
-                    Message = message
-                };
-
-                return Task.FromResult(result);
-            }
-        }
-
-
-        /// <summary>
-        ///     Asynchronously send a single message to a Kafka topic/partition.
-        /// </summary>
-        /// <param name="topicPartition">
-        ///     The topic/partition to produce the message to.
-        /// </param>
-        /// <param name="message">
-        ///     The message to produce.
-        /// </param>
-        /// <param name="deliveryHandler">
-        ///     A delegate that will be called with a delivery report corresponding
-        ///     to the produce request (if enabled).
-        /// </param>
-        public void BeginProduce(TopicPartition topicPartition, Message<TKey, TValue> message, Action<DeliveryReportResult<TKey, TValue>> deliveryHandler = null)
-        {
-            var keyBytes = keySerializer(topicPartition.Topic, message.Key);
-            var valBytes = valueSerializer(topicPartition.Topic, message.Value);
-
-            producer.ProduceImpl(
-                topicPartition.Topic,
-                valBytes, 0, valBytes == null ? 0 : valBytes.Length, 
-                keyBytes, 0, keyBytes == null ? 0 : keyBytes.Length, 
-                message.Timestamp, topicPartition.Partition, 
-                message.Headers, 
-                new TypedDeliveryHandlerShim_Action(
-                    topicPartition.Topic,
-                    producer.enableDeliveryReportKey ? message.Key : default(TKey),
-                    producer.enableDeliveryReportValue ? message.Value : default(TValue),
-                    deliveryHandler)
-            );
-        }
-
-
-        /// <summary>
-        ///     Asynchronously send a single message to a Kafka topic.
-        ///     The partition the message is sent to is determined using
-        ///     the partitioner defined using the 'partitioner' 
-        ///     configuration property.
-        /// </summary>
-        /// <param name="topic">
-        ///     The topic to produce the message to.
-        /// </param>
-        /// <param name="message">
-        ///     The message to produce.
-        /// </param>
-        /// <param name="deliveryHandler">
-        ///     A delegate that will be called with a delivery report corresponding
-        ///     to the produce request (if enabled).
-        /// </param>
-        public void BeginProduce(string topic, Message<TKey, TValue> message, Action<DeliveryReportResult<TKey, TValue>> deliveryHandler = null)
-        {
-            var keyBytes = keySerializer(topic, message.Key);
-            var valBytes = valueSerializer(topic, message.Value);
-
-            producer.ProduceImpl(
-                topic,
-                valBytes, 0, valBytes == null ? 0 : valBytes.Length,
-                keyBytes, 0, keyBytes == null ? 0 : keyBytes.Length,
-                message.Timestamp, Partition.Any,
-                message.Headers,
-                new TypedDeliveryHandlerShim_Action(
-                    topic,
-                    producer.enableDeliveryReportKey ? message.Key : default(TKey), 
-                    producer.enableDeliveryReportValue ? message.Value : default(TValue), 
-                    deliveryHandler)
-            );
-        }
-    }
-
-
-
-    /// <summary>
-    ///     A high-level Apache Kafka producer (without serialization).
-    /// </summary>
-    internal class Producer : IClient
-    {
-        internal class UntypedDeliveryReport
-        {
-            /// <summary>
-            ///     The topic associated with the message.
-            /// </summary>
-            public string Topic { get; set; }
-
-            /// <summary>
-            ///     The partition associated with the message.
-            /// </summary>
-            public Partition Partition { get; set; } = Partition.Any;
-
-            /// <summary>
-            ///     The partition offset associated with the message.
-            /// </summary>
-            public Offset Offset { get; set; } = Offset.Invalid;
-
-            /// <summary>
-            ///     An error (or NoError) associated with the message.
-            /// </summary>
-            public Error Error { get; set; }
-
-            /// <summary>
-            ///     The TopicPartition associated with the message.
-            /// </summary>
-            public TopicPartition TopicPartition
-                => new TopicPartition(Topic, Partition);
-
-            /// <summary>
-            ///     The TopicPartitionOffset associated with the message.
-            /// </summary>
-            public TopicPartitionOffset TopicPartitionOffset
-                => new TopicPartitionOffset(Topic, Partition, Offset);
-
-            /// <summary>
-            ///     The TopicPartitionOffsetError assoicated with the message.
-            /// </summary>
-            public TopicPartitionOffsetError TopicPartitionOffsetError
-            {
-                get
-                {
-                    return new TopicPartitionOffsetError(Topic, Partition, Offset, Error);
-                }
-                set
-                {
-                    Topic = value.Topic;
-                    Partition = value.Partition;
-                    Offset = value.Offset;
-                    Error = value.Error;
-                }
-            }
-
-            /// <summary>
-            ///     The message that was produced.
-            /// </summary>
-            public Message Message { get; set; }
-        }
-        
+            { typeof(Null), Serializers.Null },
+            { typeof(int), Serializers.Int32 },
+            { typeof(long), Serializers.Int64 },
+            { typeof(string), Serializers.Utf8 },
+            { typeof(float), Serializers.Single },
+            { typeof(double), Serializers.Double },
+            { typeof(byte[]), Serializers.ByteArray }
+        };
+
+        private int cancellationDelayMaxMs;
         private bool disposeHasBeenCalled = false;
         private object disposeHasBeenCalledLockObj = new object();
 
-        private readonly bool manualPoll = false;
-        internal readonly bool enableDeliveryReports = true;
-        internal readonly bool enableDeliveryReportHeaders = true;
-        internal readonly bool enableDeliveryReportKey = true;
-        internal readonly bool enableDeliveryReportValue = true;
-        internal readonly bool enableDeliveryReportTimestamp = true;
+        private bool manualPoll = false;
+        private bool enableDeliveryReports = true;
+        private bool enableDeliveryReportKey = true;
+        private bool enableDeliveryReportValue = true;
+        private bool enableDeliveryReportTimestamp = true;
+        private bool enableDeliveryReportHeaders = true;
+        private bool enableDeliveryReportPersistedStatus = true;
 
-        private readonly SafeKafkaHandle kafkaHandle;
+        private SafeKafkaHandle ownedKafkaHandle;
+        private Handle borrowedHandle;
 
-        private readonly Task callbackTask;
-        private readonly CancellationTokenSource callbackCts;
+        private SafeKafkaHandle KafkaHandle
+            => ownedKafkaHandle != null 
+                ? ownedKafkaHandle
+                : borrowedHandle.LibrdkafkaHandle;
 
-        private const int POLL_TIMEOUT_MS = 100;
+        private Task callbackTask;
+        private CancellationTokenSource callbackCts;
+
         private Task StartPollTask(CancellationToken ct)
             => Task.Factory.StartNew(() =>
                 {
@@ -821,52 +87,51 @@ namespace Confluent.Kafka
                         while (true)
                         {
                             ct.ThrowIfCancellationRequested();
-                            kafkaHandle.Poll((IntPtr)POLL_TIMEOUT_MS);
+                            ownedKafkaHandle.Poll((IntPtr)cancellationDelayMaxMs);
                         }
                     }
                     catch (OperationCanceledException) {}
                 }, ct, TaskCreationOptions.LongRunning, TaskScheduler.Default);
 
 
-        private readonly Librdkafka.ErrorDelegate errorCallbackDelegate;
+        private Action<Error> errorHandler;
+        private Librdkafka.ErrorDelegate errorCallbackDelegate;
         private void ErrorCallback(IntPtr rk, ErrorCode err, string reason, IntPtr opaque)
         {
             // Ensure registered handlers are never called as a side-effect of Dispose/Finalize (prevents deadlocks in common scenarios).
-            if (kafkaHandle.IsClosed) { return; }
-            OnError?.Invoke(this, new ErrorEvent(new Error(err, reason), false));
+            if (ownedKafkaHandle.IsClosed) { return; }
+            errorHandler?.Invoke(KafkaHandle.CreatePossiblyFatalError(err, reason));
         }
 
 
-        private readonly Librdkafka.StatsDelegate statsCallbackDelegate;
-        private int StatsCallback(IntPtr rk, IntPtr json, UIntPtr json_len, IntPtr opaque)
+        private Action<string> statisticsHandler;
+        private Librdkafka.StatsDelegate statisticsCallbackDelegate;
+        private int StatisticsCallback(IntPtr rk, IntPtr json, UIntPtr json_len, IntPtr opaque)
         {
             // Ensure registered handlers are never called as a side-effect of Dispose/Finalize (prevents deadlocks in common scenarios).
-            if (kafkaHandle.IsClosed) { return 0; }
-            OnStatistics?.Invoke(this, Util.Marshal.PtrToStringUTF8(json));
+            if (ownedKafkaHandle.IsClosed) { return 0; }
+            statisticsHandler?.Invoke(Util.Marshal.PtrToStringUTF8(json));
             return 0; // instruct librdkafka to immediately free the json ptr.
         }
 
 
+        private Action<LogMessage> logHandler;
         private object loggerLockObj = new object();
-        private readonly Librdkafka.LogDelegate logCallbackDelegate;
+        private Librdkafka.LogDelegate logCallbackDelegate;
         private void LogCallback(IntPtr rk, SyslogLevel level, string fac, string buf)
         {
             // Ensure registered handlers are never called as a side-effect of Dispose/Finalize (prevents deadlocks in common scenarios).
             // Note: kafkaHandle can be null if the callback is during construction (in that case, we want the delegate to run).
-            if (kafkaHandle != null && kafkaHandle.IsClosed) { return; }
-            OnLog?.Invoke(this, new LogMessage(Util.Marshal.PtrToStringUTF8(Librdkafka.name(rk)), level, fac, buf));
+            if (ownedKafkaHandle != null && ownedKafkaHandle.IsClosed) { return; }
+            logHandler?.Invoke(new LogMessage(Util.Marshal.PtrToStringUTF8(Librdkafka.name(rk)), level, fac, buf));
         }
 
         private Librdkafka.DeliveryReportDelegate DeliveryReportCallback;
 
-        /// <remarks>
-        ///     note: this property is set to that defined in rd_kafka_conf
-        ///     (which is never used by confluent-kafka-dotnet).
-        /// </remarks>
         private void DeliveryReportCallbackImpl(IntPtr rk, IntPtr rkmessage, IntPtr opaque)
         {
             // Ensure registered handlers are never called as a side-effect of Dispose/Finalize (prevents deadlocks in common scenarios).
-            if (kafkaHandle.IsClosed) { return; }
+            if (ownedKafkaHandle.IsClosed) { return; }
 
             var msg = Util.Marshal.PtrToStructureUnsafe<rd_kafka_message>(rkmessage);
 
@@ -917,20 +182,26 @@ namespace Confluent.Kafka
                 timestamp = Librdkafka.message_timestamp(rkmessage, out timestampType);
             }
 
+            PersistenceStatus messageStatus = PersistenceStatus.PossiblyPersisted;
+            if (enableDeliveryReportPersistedStatus)
+            {
+                messageStatus = Librdkafka.message_status(rkmessage);
+            }
+
             deliveryHandler.HandleDeliveryReport(
-                new UntypedDeliveryReport 
+                new DeliveryReport<Null, Null>
                 {
                     // Topic is not set here in order to avoid the marshalling cost.
                     // Instead, the delivery handler is expected to cache the topic string.
                     Partition = msg.partition, 
                     Offset = msg.offset, 
-                    Error = msg.err,
-                    Message = new Message { Timestamp = new Timestamp(timestamp, (TimestampType)timestampType), Headers = headers }
+                    Error = KafkaHandle.CreatePossiblyFatalError(msg.err, null),
+                    Message = new Message<Null, Null> { Timestamp = new Timestamp(timestamp, (TimestampType)timestampType), Headers = headers }
                 }
             );
         }
 
-        internal void ProduceImpl(
+        private void ProduceImpl(
             string topic,
             byte[] val, int valOffset, int valLength,
             byte[] key, int keyOffset, int keyLength,
@@ -943,7 +214,7 @@ namespace Confluent.Kafka
             {
                 if (timestamp != Timestamp.Default)
                 {
-                    throw new ArgumentException("Timestamp must be either Timestamp.Default, or timestamp type must equal CreateTime.");
+                    throw new ArgumentException("Timestamp must be either Timestamp.Default, or Timestamp.CreateTime.");
                 }
             }
 
@@ -958,7 +229,7 @@ namespace Confluent.Kafka
                 var gch = GCHandle.Alloc(deliveryHandler);
                 var ptr = GCHandle.ToIntPtr(gch);
 
-                var err = kafkaHandle.Produce(
+                var err = KafkaHandle.Produce(
                     topic,
                     val, valOffset, valLength,
                     key, keyOffset, keyLength,
@@ -970,12 +241,12 @@ namespace Confluent.Kafka
                 if (err != ErrorCode.NoError)
                 {
                     gch.Free();
-                    throw new KafkaException(err);
+                    throw new KafkaException(KafkaHandle.CreatePossiblyFatalError(err, null));
                 }
             }
             else
             {
-                var err = kafkaHandle.Produce(
+                var err = KafkaHandle.Produce(
                     topic,
                     val, valOffset, valLength,
                     key, keyOffset, keyLength,
@@ -986,173 +257,118 @@ namespace Confluent.Kafka
 
                 if (err != ErrorCode.NoError)
                 {
-                    throw new KafkaException(err);
+                    throw new KafkaException(KafkaHandle.CreatePossiblyFatalError(err, null));
                 }
             }
         }
 
 
         /// <summary>
-        ///     Refer to <see cref="Confluent.Kafka.IClient.OnLog" />.
+        ///     Poll for callback events. Typically, you should not 
+        ///     call this method. Only call on producer instances 
+        ///     where background polling has been disabled.
         /// </summary>
-        public event EventHandler<LogMessage> OnLog;
-
-        /// <summary>
-        ///     Refer to <see cref="Confluent.Kafka.IClient.OnError" />.
-        /// </summary>
-        public event EventHandler<ErrorEvent> OnError;
-
-        /// <summary>
-        ///     Refer to <see cref="Confluent.Kafka.IClient.OnStatistics" />.
-        /// </summary>
-        public event EventHandler<string> OnStatistics;
-
-
-        /// <summary>
-        ///     <see cref="Confluent.Kafka.Producer{TKey, TValue}" />
-        /// </summary>
-        public Producer(IEnumerable<KeyValuePair<string, string>> config)
-        {
-            // TODO: Make Tasks auto complete when EnableDeliveryReportsPropertyName is set to false.
-            // TODO: Hijack the "delivery.report.only.error" configuration parameter and add functionality to enforce that Tasks 
-            //       that never complete are never created when this is set to true.
-
-            this.DeliveryReportCallback = DeliveryReportCallbackImpl;
-
-            Librdkafka.Initialize(null);
-
-            var modifiedConfig = config
-                .Where(prop => 
-                    prop.Key != ConfigPropertyNames.ProducerEnableBackgroundPoll &&
-                    prop.Key != ConfigPropertyNames.ProducerEnableDeliveryReports &&
-                    prop.Key != ConfigPropertyNames.ProducerDeliveryReportFields);
-
-            if (modifiedConfig.Where(obj => obj.Key == "delivery.report.only.error").Count() > 0)
-            {
-                // A managed object is kept alive over the duration of the produce request. If there is no
-                // delivery report generated, there will be a memory leak. We could possibly support this 
-                // property by keeping track of delivery reports in managed code, but this seems like 
-                // more trouble than it's worth.
-                throw new ArgumentException("The 'delivery.report.only.error' property is not supported by this client");
-            }
-
-            var enableBackgroundPollObj = config.FirstOrDefault(prop => prop.Key == ConfigPropertyNames.ProducerEnableBackgroundPoll).Value;
-            if (enableBackgroundPollObj != null)
-            {
-                this.manualPoll = !bool.Parse(enableBackgroundPollObj.ToString());
-            }
-
-            var enableDeliveryReportsObj = config.FirstOrDefault(prop => prop.Key == ConfigPropertyNames.ProducerEnableDeliveryReports).Value;
-            if (enableDeliveryReportsObj != null)
-            {
-                this.enableDeliveryReports = bool.Parse(enableDeliveryReportsObj.ToString());
-            }
-
-            var deliveryReportEnabledFieldsObj = config.FirstOrDefault(prop => prop.Key == ConfigPropertyNames.ProducerDeliveryReportFields).Value;
-            if (deliveryReportEnabledFieldsObj != null)
-            {
-                var fields = deliveryReportEnabledFieldsObj.ToString().Replace(" ", "");
-                if (fields != "all")
-                {
-                    this.enableDeliveryReportKey = false;
-                    this.enableDeliveryReportValue = false;
-                    this.enableDeliveryReportHeaders = false;
-                    this.enableDeliveryReportTimestamp = false;
-                    if (fields != "none")
-                    {
-                        var parts = fields.Split(',');
-                        foreach (var part in parts)
-                        {
-                            switch (part)
-                            {
-                                case "key": this.enableDeliveryReportKey = true; break;
-                                case "value": this.enableDeliveryReportValue = true; break;
-                                case "timestamp": this.enableDeliveryReportTimestamp = true; break;
-                                case "headers": this.enableDeliveryReportHeaders = true; break;
-                                default: throw new ArgumentException(
-                                    $"Unexpected delivery report field name '{part}' in config value '{ConfigPropertyNames.ProducerDeliveryReportFields}'.");
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Note: changing the default value of produce.offset.report at the binding level is less than
-            // ideal since it means the librdkafka configuration docs will no longer completely match the 
-            // .NET client. The default should probably be changed in librdkafka as well.
-            if (modifiedConfig.FirstOrDefault(prop => prop.Key == "produce.offset.report").Value == null)
-            {
-                modifiedConfig = modifiedConfig.Concat(new KeyValuePair<string, string>[] { new KeyValuePair<string, string>("produce.offset.report", "true") });
-            }
-
-            var configHandle = SafeConfigHandle.Create();
-
-            modifiedConfig.ToList().ForEach((kvp) => {
-                if (kvp.Value == null) throw new ArgumentException($"'{kvp.Key}' configuration parameter must not be null.");
-                configHandle.Set(kvp.Key, kvp.Value.ToString());
-            });
-
-
-            IntPtr configPtr = configHandle.DangerousGetHandle();
-
-            if (enableDeliveryReports)
-            {
-                Librdkafka.conf_set_dr_msg_cb(configPtr, DeliveryReportCallback);
-            }
-
-            // Explicitly keep references to delegates so they are not reclaimed by the GC.
-            errorCallbackDelegate = ErrorCallback;
-            logCallbackDelegate = LogCallback;
-            statsCallbackDelegate = StatsCallback;
-
-            // TODO: provide some mechanism whereby calls to the error and log callbacks are cached until
-            //       such time as event handlers have had a chance to be registered.
-            Librdkafka.conf_set_error_cb(configPtr, errorCallbackDelegate);
-            Librdkafka.conf_set_log_cb(configPtr, logCallbackDelegate);
-            Librdkafka.conf_set_stats_cb(configPtr, statsCallbackDelegate);
-
-            this.kafkaHandle = SafeKafkaHandle.Create(RdKafkaType.Producer, configPtr, this);
-            configHandle.SetHandleAsInvalid(); // config object is no longer useable.
-
-            if (!manualPoll)
-            {
-                callbackCts = new CancellationTokenSource();
-                callbackTask = StartPollTask(callbackCts.Token);
-            }
-        }
-
-
-        internal int Poll(int millisecondsTimeout)
+        /// <param name="timeout">
+        ///     The maximum period of time to block if no callback events
+        ///     are waiting. You should typically use a relatively short 
+        ///     timout period because this operation cannot be cancelled.
+        /// </param>
+        /// <returns>
+        ///     Returns the number of events served.
+        /// </returns>
+        public int Poll(TimeSpan timeout)
         {
             if (!manualPoll)
             {
                 throw new InvalidOperationException("Poll method called, but manual polling is not enabled.");
             }
 
-            return this.kafkaHandle.Poll((IntPtr)millisecondsTimeout);
+            return this.KafkaHandle.Poll((IntPtr)timeout.TotalMillisecondsAsInt());
         }
 
 
         /// <summary>
-        ///     <see cref="Confluent.Kafka.Producer{TKey, TValue}" />
+        ///     Wait until all outstanding produce requests and delievery report
+        ///     callbacks are completed.
+        ///    
+        ///     [API-SUBJECT-TO-CHANGE] - the semantics and/or type of the return value
+        ///     is subject to change.
         /// </summary>
-        public int Poll(TimeSpan timeout)
-            => Poll(timeout.TotalMillisecondsAsInt());
-
-
-        internal int Flush(int millisecondsTimeout)
-            => kafkaHandle.Flush(millisecondsTimeout);
+        /// <param name="timeout">
+        ///     The maximum length of time to block. You should typically use a
+        ///     relatively short timout period and loop until the return value
+        ///     becomes zero because this operation cannot be cancelled. 
+        /// </param>
+        /// <returns>
+        ///     The current librdkafka out queue length. This should be interpreted
+        ///     as a rough indication of the number of messages waiting to be sent
+        ///     to or acknowledged by the broker. If zero, there are no outstanding
+        ///     messages or callbacks. Specifically, the value is equal to the sum
+        ///     of the number of produced messages for which a delivery report has
+        ///     not yet been handled and a number which is less than or equal to the
+        ///     number of pending delivery report callback events (as determined by
+        ///     the number of outstanding protocol requests).
+        /// </returns>
+        /// <remarks>
+        ///     This method should typically be called prior to destroying a producer
+        ///     instance to make sure all queued and in-flight produce requests are
+        ///     completed before terminating. The wait time is bounded by the
+        ///     timeout parameter.
+        ///    
+        ///     A related configuration parameter is message.timeout.ms which determines
+        ///     the maximum length of time librdkafka attempts to deliver a message 
+        ///     before giving up and so also affects the maximum time a call to Flush 
+        ///     may block.
+        /// 
+        ///     Where this Producer instance shares a Handle with one or more other
+        ///     producer instances, the Flush method will wait on messages produced by
+        ///     the other producer instances as well.
+        /// </remarks>
+        public int Flush(TimeSpan timeout)
+            => KafkaHandle.Flush(timeout.TotalMillisecondsAsInt());
 
 
         /// <summary>
-        ///     <see cref="Confluent.Kafka.Producer{TKey, TValue}" />
+        ///     Wait until all outstanding produce requests and delievery report
+        ///     callbacks are completed.
         /// </summary>
-        internal int Flush(TimeSpan timeout)
-            => kafkaHandle.Flush(timeout.TotalMillisecondsAsInt());
+        /// <remarks>
+        ///     This method should typically be called prior to destroying a producer
+        ///     instance to make sure all queued and in-flight produce requests are
+        ///     completed before terminating. 
+        ///    
+        ///     A related configuration parameter is message.timeout.ms which determines
+        ///     the maximum length of time librdkafka attempts to deliver a message 
+        ///     before giving up and so also affects the maximum time a call to Flush 
+        ///     may block.
+        /// 
+        ///     Where this Producer instance shares a Handle with one or more other
+        ///     producer instances, the Flush method will wait on messages produced by
+        ///     the other producer instances as well.
+        /// </remarks>
+        /// <exception cref="System.OperationCanceledException">
+        ///     Thrown if the operation is cancelled.
+        /// </exception>
+        public void Flush(CancellationToken cancellationToken)
+        {
+            while (true)
+            {
+                int result = KafkaHandle.Flush(100);
+                if (result == 0)
+                {
+                    return;
+                }
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    // TODO: include flush number in exception.
+                    throw new OperationCanceledException();
+                }
+            }
+        }
 
-
+        
         /// <summary>
-        ///     <see cref="Confluent.Kafka.Producer{TKey, TValue}" />
+        ///     Releases all resources used by this <see cref="Producer{TKey,TValue}" />.
         /// </summary>
         public void Dispose()
         {
@@ -1162,8 +378,14 @@ namespace Confluent.Kafka
 
 
         /// <summary>
-        ///     <see cref="Confluent.Kafka.Producer{TKey, TValue}" />
+        ///     Releases the unmanaged resources used by the
+        ///     <see cref="Producer{TKey,TValue}" />
+        ///     and optionally disposes the managed resources.
         /// </summary>
+        /// <param name="disposing">
+        ///     true to release both managed and unmanaged resources;
+        ///     false to release only unmanaged resources.
+        /// </param>
         protected virtual void Dispose(bool disposing)
         {
             // Calling Dispose a second or subsequent time should be a no-op.
@@ -1172,6 +394,9 @@ namespace Confluent.Kafka
                 if (disposeHasBeenCalled) { return; }
                 disposeHasBeenCalled = true;
             }
+
+            // do nothing if we borrowed a handle.
+            if (ownedKafkaHandle == null) { return; }
 
             if (disposing)
             {
@@ -1202,29 +427,590 @@ namespace Confluent.Kafka
                 // registers with librdkafka ensure that any registered
                 // events are not called if kafkaHandle has been closed.
                 // this avoids deadlocks in common scenarios.
-                kafkaHandle.Dispose();
+                ownedKafkaHandle.Dispose();
             }
         }
 
 
         /// <summary>
-        ///     <see cref="Confluent.Kafka.Producer{TKey, TValue}" />
+        ///     <see cref="IClient.Name" />
         /// </summary>
         public string Name
-            => kafkaHandle.Name;
+            => KafkaHandle.Name;
 
 
         /// <summary>
-        ///     <see cref="Confluent.Kafka.Producer{TKey, TValue}" />
+        ///     <see cref="IClient.AddBrokers(string)" />
         /// </summary>
         public int AddBrokers(string brokers)
-            => kafkaHandle.AddBrokers(brokers);
+            => KafkaHandle.AddBrokers(brokers);
 
 
         /// <summary>
-        ///     <see cref="Confluent.Kafka.Producer{TKey, TValue}" />
+        ///     <see cref="IClient.Handle" />
         /// </summary>
         public Handle Handle 
-            => new Handle { Owner = this, LibrdkafkaHandle = kafkaHandle };
+        {
+            get
+            {
+                if (this.ownedKafkaHandle != null)
+                {
+                    return new Handle { Owner = this, LibrdkafkaHandle = ownedKafkaHandle };
+                }
+                
+                return borrowedHandle;
+            }
+        }
+
+        private void InitializeSerializers(
+            ISerializer<TKey> keySerializer,
+            ISerializer<TValue> valueSerializer,
+            IAsyncSerializer<TKey> asyncKeySerializer,
+            IAsyncSerializer<TValue> asyncValueSerializer)
+        {
+            // setup key serializer.
+            if (keySerializer == null && asyncKeySerializer == null)
+            {
+                if (!defaultSerializers.TryGetValue(typeof(TKey), out object serializer))
+                {
+                    throw new ArgumentNullException(
+                        $"Key serializer not specified and there is no default serializer defined for type {typeof(TKey).Name}.");
+                }
+                this.keySerializer = (ISerializer<TKey>)serializer;
+            }
+            else if (keySerializer == null && asyncKeySerializer != null)
+            {
+                this.asyncKeySerializer = asyncKeySerializer;
+            }
+            else if (keySerializer != null && asyncKeySerializer == null)
+            {
+                this.keySerializer = keySerializer;
+            }
+            else
+            {
+                throw new InvalidOperationException("FATAL: Both async and sync key serializers were set.");
+            }
+
+            // setup value serializer.
+            if (valueSerializer == null && asyncValueSerializer == null)
+            {
+                if (!defaultSerializers.TryGetValue(typeof(TValue), out object serializer))
+                {
+                    throw new ArgumentNullException(
+                        $"Value serializer not specified and there is no default serializer defined for type {typeof(TKey).Name}.");
+                }
+                this.valueSerializer = (ISerializer<TValue>)serializer;
+            }
+            else if (valueSerializer == null && asyncValueSerializer != null)
+            {
+                this.asyncValueSerializer = asyncValueSerializer;
+            }
+            else if (valueSerializer != null && asyncValueSerializer == null)
+            {
+                this.valueSerializer = valueSerializer;
+            }
+            else
+            {
+                throw new InvalidOperationException("FATAL: Both async and sync value serializers were set.");
+            }
+        }
+
+        internal Producer(DependentProducerBuilder<TKey, TValue> builder)
+        {
+            this.borrowedHandle = builder.Handle;
+
+            if (!borrowedHandle.Owner.GetType().Name.Contains("Producer")) // much simpler than checking actual types.
+            {
+                throw new Exception("A Producer instance may only be constructed using the handle of another Producer instance.");
+            }
+
+            InitializeSerializers(
+                builder.KeySerializer, builder.ValueSerializer,
+                builder.AsyncKeySerializer, builder.AsyncValueSerializer);
+        }
+
+        internal Producer(ProducerBuilder<TKey, TValue> builder)
+        {
+            var baseConfig = builder.ConstructBaseConfig(this);
+
+            // TODO: Make Tasks auto complete when EnableDeliveryReportsPropertyName is set to false.
+            // TODO: Hijack the "delivery.report.only.error" configuration parameter and add functionality to enforce that Tasks 
+            //       that never complete are never created when this is set to true.
+
+            this.statisticsHandler = baseConfig.statisticsHandler;
+            this.logHandler = baseConfig.logHandler;
+            this.errorHandler = baseConfig.errorHandler;
+
+            var config = Confluent.Kafka.Config.ExtractCancellationDelayMaxMs(baseConfig.config, out this.cancellationDelayMaxMs);
+
+            this.DeliveryReportCallback = DeliveryReportCallbackImpl;
+
+            Librdkafka.Initialize(null);
+
+            var modifiedConfig = config
+                .Where(prop => 
+                    prop.Key != ConfigPropertyNames.Producer.EnableBackgroundPoll &&
+                    prop.Key != ConfigPropertyNames.Producer.EnableDeliveryReports &&
+                    prop.Key != ConfigPropertyNames.Producer.DeliveryReportFields);
+
+            if (modifiedConfig.Where(obj => obj.Key == "delivery.report.only.error").Count() > 0)
+            {
+                // A managed object is kept alive over the duration of the produce request. If there is no
+                // delivery report generated, there will be a memory leak. We could possibly support this 
+                // property by keeping track of delivery reports in managed code, but this seems like 
+                // more trouble than it's worth.
+                throw new ArgumentException("The 'delivery.report.only.error' property is not supported by this client");
+            }
+
+            var enableBackgroundPollObj = config.FirstOrDefault(prop => prop.Key == ConfigPropertyNames.Producer.EnableBackgroundPoll).Value;
+            if (enableBackgroundPollObj != null)
+            {
+                this.manualPoll = !bool.Parse(enableBackgroundPollObj.ToString());
+            }
+
+            var enableDeliveryReportsObj = config.FirstOrDefault(prop => prop.Key == ConfigPropertyNames.Producer.EnableDeliveryReports).Value;
+            if (enableDeliveryReportsObj != null)
+            {
+                this.enableDeliveryReports = bool.Parse(enableDeliveryReportsObj.ToString());
+            }
+
+            var deliveryReportEnabledFieldsObj = config.FirstOrDefault(prop => prop.Key == ConfigPropertyNames.Producer.DeliveryReportFields).Value;
+            if (deliveryReportEnabledFieldsObj != null)
+            {
+                var fields = deliveryReportEnabledFieldsObj.ToString().Replace(" ", "");
+                if (fields != "all")
+                {
+                    this.enableDeliveryReportKey = false;
+                    this.enableDeliveryReportValue = false;
+                    this.enableDeliveryReportHeaders = false;
+                    this.enableDeliveryReportTimestamp = false;
+                    this.enableDeliveryReportPersistedStatus = false;
+                    if (fields != "none")
+                    {
+                        var parts = fields.Split(',');
+                        foreach (var part in parts)
+                        {
+                            switch (part)
+                            {
+                                case "key": this.enableDeliveryReportKey = true; break;
+                                case "value": this.enableDeliveryReportValue = true; break;
+                                case "timestamp": this.enableDeliveryReportTimestamp = true; break;
+                                case "headers": this.enableDeliveryReportHeaders = true; break;
+                                case "status": this.enableDeliveryReportPersistedStatus = true; break;
+                                default: throw new ArgumentException(
+                                    $"Unknown delivery report field name '{part}' in config value '{ConfigPropertyNames.Producer.DeliveryReportFields}'.");
+                            }
+                        }
+                    }
+                }
+            }
+
+            var configHandle = SafeConfigHandle.Create();
+
+            modifiedConfig.ToList().ForEach((kvp) => {
+                if (kvp.Value == null) throw new ArgumentNullException($"'{kvp.Key}' configuration parameter must not be null.");
+                configHandle.Set(kvp.Key, kvp.Value.ToString());
+            });
+
+
+            IntPtr configPtr = configHandle.DangerousGetHandle();
+
+            if (enableDeliveryReports)
+            {
+                Librdkafka.conf_set_dr_msg_cb(configPtr, DeliveryReportCallback);
+            }
+
+            // Explicitly keep references to delegates so they are not reclaimed by the GC.
+            errorCallbackDelegate = ErrorCallback;
+            logCallbackDelegate = LogCallback;
+            statisticsCallbackDelegate = StatisticsCallback;
+
+            Librdkafka.conf_set_error_cb(configPtr, errorCallbackDelegate);
+            Librdkafka.conf_set_log_cb(configPtr, logCallbackDelegate);
+            Librdkafka.conf_set_stats_cb(configPtr, statisticsCallbackDelegate);
+
+            this.ownedKafkaHandle = SafeKafkaHandle.Create(RdKafkaType.Producer, configPtr, this);
+            configHandle.SetHandleAsInvalid(); // config object is no longer useable.
+
+            if (!manualPoll)
+            {
+                callbackCts = new CancellationTokenSource();
+                callbackTask = StartPollTask(callbackCts.Token);
+            }
+
+            InitializeSerializers(
+                builder.KeySerializer, builder.ValueSerializer,
+                builder.AsyncKeySerializer, builder.AsyncValueSerializer);
+        }
+
+
+        /// <summary>
+        ///     Asynchronously send a single message to a Kafka topic/partition.
+        /// </summary>
+        /// <param name="topicPartition">
+        ///     The topic/partition to produce the message to.
+        /// </param>
+        /// <param name="message">
+        ///     The message to produce.
+        /// </param>
+        /// <returns>
+        ///     A Task which will complete with a delivery report corresponding to
+        ///     the produce request, or an exception if an error occured.
+        /// </returns>
+        public Task<DeliveryResult<TKey, TValue>> ProduceAsync(
+            TopicPartition topicPartition,
+            Message<TKey, TValue> message)
+        {
+            byte[] keyBytes;
+            try
+            {
+                keyBytes = (keySerializer != null)
+                    ? keySerializer.Serialize(message.Key, true, message, topicPartition)
+                    : asyncKeySerializer.SerializeAsync(message.Key, true, message, topicPartition)
+                        .ConfigureAwait(continueOnCapturedContext: false)
+                        .GetAwaiter()
+                        .GetResult();
+            }
+            catch (Exception exception)
+            {
+                throw new ProduceException<TKey, TValue>(
+                    new Error(ErrorCode.Local_KeySerialization),
+                    new DeliveryResult<TKey, TValue>
+                    {
+                        Message = message,
+                        TopicPartitionOffset = new TopicPartitionOffset(topicPartition, Offset.Invalid)
+                    },
+                    exception);
+            }
+
+            byte[] valBytes;
+            try
+            {
+                valBytes = (valueSerializer != null)
+                    ? valueSerializer.Serialize(message.Value, false, message, topicPartition)
+                    : asyncValueSerializer.SerializeAsync(message.Value, false, message, topicPartition)
+                        .ConfigureAwait(continueOnCapturedContext: false)
+                        .GetAwaiter()
+                        .GetResult();
+            }
+            catch (Exception exception)
+            {
+                throw new ProduceException<TKey, TValue>(
+                    new Error(ErrorCode.Local_ValueSerialization),
+                    new DeliveryResult<TKey, TValue>
+                    {
+                        Message = message,
+                        TopicPartitionOffset = new TopicPartitionOffset(topicPartition, Offset.Invalid)
+                    },
+                    exception);
+            }
+
+            try
+            {
+                if (enableDeliveryReports)
+                {
+                    var handler = new TypedTaskDeliveryHandlerShim<TKey, TValue>(topicPartition.Topic,
+                        enableDeliveryReportKey ? message.Key : default(TKey),
+                        enableDeliveryReportValue ? message.Value : default(TValue));
+
+                    ProduceImpl(
+                        topicPartition.Topic,
+                        valBytes, 0, valBytes == null ? 0 : valBytes.Length,
+                        keyBytes, 0, keyBytes == null ? 0 : keyBytes.Length,
+                        message.Timestamp, topicPartition.Partition, message.Headers,
+                        handler);
+
+                    return handler.Task;
+                }
+                else
+                {
+                    ProduceImpl(
+                        topicPartition.Topic, 
+                        valBytes, 0, valBytes == null ? 0 : valBytes.Length, 
+                        keyBytes, 0, keyBytes == null ? 0 : keyBytes.Length, 
+                        message.Timestamp, topicPartition.Partition, message.Headers, 
+                        null);
+
+                    var result = new DeliveryResult<TKey, TValue>
+                    {
+                        TopicPartitionOffset = new TopicPartitionOffset(topicPartition, Offset.Invalid),
+                        Message = message
+                    };
+
+                    return Task.FromResult(result);
+                }
+            }
+            catch (KafkaException ex)
+            {
+                throw new ProduceException<TKey, TValue>(
+                    ex.Error,
+                    new DeliveryResult<TKey, TValue>
+                    {
+                        Message = message,
+                        TopicPartitionOffset = new TopicPartitionOffset(topicPartition, Offset.Invalid)
+                    });
+            }
+
+            // want other exceptions: ArgumentException, InvalidOperationException to propagate up.
+        }
+
+
+        /// <summary>
+        ///     Asynchronously send a single message to a Kafka topic.
+        ///     The partition the message is sent to is determined by
+        ///     the partitioner defined using the 'partitioner' 
+        ///     configuration property.
+        /// </summary>
+        /// <param name="topic">
+        ///     The topic to produce the message to.
+        /// </param>
+        /// <param name="message">
+        ///     The message to produce.
+        /// </param>
+        /// <returns>
+        ///     A Task which will complete with a delivery report corresponding to
+        ///     the produce request, or an exception if an error occured.
+        /// </returns>
+        public Task<DeliveryResult<TKey, TValue>> ProduceAsync(
+            string topic,
+            Message<TKey, TValue> message
+        )
+            => ProduceAsync(new TopicPartition(topic, Partition.Any), message);
+
+
+        /// <summary>
+        ///     Asynchronously send a single message to a Kafka topic.
+        ///     The partition the message is sent to is determined by
+        ///     the partitioner defined using the 'partitioner' 
+        ///     configuration property.
+        /// </summary>
+        /// <param name="topic">
+        ///     The topic to produce the message to.
+        /// </param>
+        /// <param name="message">
+        ///     The message to produce.
+        /// </param>
+        /// <param name="deliveryHandler">
+        ///     A delegate that will be called with a delivery report corresponding
+        ///     to the produce request (if enabled).
+        /// </param>
+        public void BeginProduce(
+            string topic,
+            Message<TKey, TValue> message,
+            Action<DeliveryReport<TKey, TValue>> deliveryHandler = null
+        )
+            => BeginProduce(new TopicPartition(topic, Partition.Any), message, deliveryHandler);
+
+
+        /// <summary>
+        ///     Asynchronously send a single message to a Kafka topic/partition.
+        /// </summary>
+        /// <param name="topicPartition">
+        ///     The topic/partition to produce the message to.
+        /// </param>
+        /// <param name="message">
+        ///     The message to produce.
+        /// </param>
+        /// <param name="deliveryHandler">
+        ///     A delegate that will be called with a delivery report corresponding
+        ///     to the produce request (if enabled).
+        /// </param>
+        public void BeginProduce(
+            TopicPartition topicPartition,
+            Message<TKey, TValue> message,
+            Action<DeliveryReport<TKey, TValue>> deliveryHandler = null)
+        {
+            if (deliveryHandler != null && !enableDeliveryReports)
+            {
+                throw new InvalidOperationException("A delivery handler was specified, but delivery reports are disabled.");
+            }
+
+            byte[] keyBytes;
+            try
+            {
+                keyBytes = (keySerializer != null)
+                    ? keySerializer.Serialize(message.Key, true, message, topicPartition)
+                    : asyncKeySerializer.SerializeAsync(message.Key, true, message, topicPartition)
+                        .ConfigureAwait(continueOnCapturedContext: false)
+                        .GetAwaiter()
+                        .GetResult();
+            }
+            catch (Exception ex)
+            {
+                throw new ProduceException<TKey, TValue>(
+                    new Error(ErrorCode.Local_KeySerialization, ex.ToString()),
+                    new DeliveryResult<TKey, TValue>
+                    {
+                        Message = message,
+                        TopicPartitionOffset = new TopicPartitionOffset(topicPartition, Offset.Invalid),
+                    }
+                );
+            }
+
+            byte[] valBytes;
+            try
+            {
+                valBytes = (valueSerializer != null)
+                    ? valueSerializer.Serialize(message.Value, false, message, topicPartition)
+                    : asyncValueSerializer.SerializeAsync(message.Value, false, message, topicPartition)
+                        .ConfigureAwait(continueOnCapturedContext: false)
+                        .GetAwaiter()
+                        .GetResult();
+            }
+            catch (Exception ex)
+            {
+                throw new ProduceException<TKey, TValue>(
+                    new Error(ErrorCode.Local_ValueSerialization, ex.ToString()),
+                    new DeliveryResult<TKey, TValue>
+                    {
+                        Message = message,
+                        TopicPartitionOffset = new TopicPartitionOffset(topicPartition, Offset.Invalid),
+                    }
+                );
+            }
+
+            try
+            {
+                ProduceImpl(
+                    topicPartition.Topic,
+                    valBytes, 0, valBytes == null ? 0 : valBytes.Length, 
+                    keyBytes, 0, keyBytes == null ? 0 : keyBytes.Length, 
+                    message.Timestamp, topicPartition.Partition, 
+                    message.Headers, 
+                    new TypedDeliveryHandlerShim_Action<TKey, TValue>(
+                        topicPartition.Topic,
+                        enableDeliveryReportKey ? message.Key : default(TKey),
+                        enableDeliveryReportValue ? message.Value : default(TValue),
+                        deliveryHandler));
+            }
+            catch (KafkaException ex)
+            {
+                throw new ProduceException<TKey, TValue>(
+                    ex.Error,
+                    new DeliveryReport<TKey, TValue>
+                        {
+                            Message = message,
+                            TopicPartitionOffset = new TopicPartitionOffset(topicPartition, Offset.Invalid)
+                        });
+            }
+
+            // want other exceptions: ArgumentException, InvalidOperationException to propagate up.
+        }
+
+        private class TypedTaskDeliveryHandlerShim<K, V> : TaskCompletionSource<DeliveryResult<K, V>>, IDeliveryHandler
+        {
+            public TypedTaskDeliveryHandlerShim(string topic, K key, V val)
+#if !NET45
+                : base(TaskCreationOptions.RunContinuationsAsynchronously)
+#endif
+            {
+                Topic = topic;
+                Key = key;
+                Value = val;
+            }
+
+            public string Topic;
+
+            public K Key;
+
+            public V Value;
+
+            public void HandleDeliveryReport(DeliveryReport<Null, Null> deliveryReport)
+            {
+                if (deliveryReport == null)
+                {
+#if NET45
+                    System.Threading.Tasks.Task.Run(() => TrySetResult(null));
+#else
+                    TrySetResult(null);
+#endif
+                    return;
+                }
+
+                var dr = new DeliveryResult<K, V>
+                {
+                    TopicPartitionOffset = deliveryReport.TopicPartitionOffset,
+                    Message = new Message<K, V>
+                    {
+                        Key = Key,
+                        Value = Value,
+                        Timestamp = deliveryReport.Message.Timestamp,
+                        Headers = deliveryReport.Message.Headers
+                    }
+                };
+                // topic is cached in this object, not set in the deliveryReport to avoid the 
+                // cost of marshalling it.
+                dr.Topic = Topic;
+
+#if NET45
+                if (deliveryReport.Error.IsError)
+                {
+                    System.Threading.Tasks.Task.Run(() => SetException(new ProduceException<K, V>(deliveryReport.Error, dr)));
+                }
+                else
+                {
+                    System.Threading.Tasks.Task.Run(() => TrySetResult(dr));
+                }
+#else
+                if (deliveryReport.Error.IsError)
+                {
+                    TrySetException(new ProduceException<K, V>(deliveryReport.Error, dr));
+                }
+                else
+                {
+                    TrySetResult(dr);
+                }
+#endif
+            }
+        }
+
+        private class TypedDeliveryHandlerShim_Action<K, V> : IDeliveryHandler
+        {
+            public TypedDeliveryHandlerShim_Action(string topic, K key, V val, Action<DeliveryReport<K, V>> handler)
+            {
+                Topic = topic;
+                Key = key;
+                Value = val;
+                Handler = handler;
+            }
+
+            public string Topic;
+
+            public K Key;
+
+            public V Value;
+
+            public Action<DeliveryReport<K, V>> Handler;
+
+            public void HandleDeliveryReport(DeliveryReport<Null, Null> deliveryReport)
+            {
+                if (deliveryReport == null)
+                {
+                    return;
+                }
+
+                var dr = new DeliveryReport<K, V>
+                {
+                    TopicPartitionOffsetError = deliveryReport.TopicPartitionOffsetError,
+                    Message = new Message<K, V> 
+                    {
+                        Key = Key,
+                        Value = Value,
+                        Timestamp = deliveryReport.Message == null 
+                            ? new Timestamp(0, TimestampType.NotAvailable) 
+                            : deliveryReport.Message.Timestamp,
+                        Headers = deliveryReport.Message?.Headers
+                    }
+                };
+                // topic is cached in this object, not set in the deliveryReport to avoid the 
+                // cost of marshalling it.
+                dr.Topic = Topic;
+
+                if (Handler != null)
+                {
+                    Handler(dr);
+                }
+            }
+        }
     }
 }

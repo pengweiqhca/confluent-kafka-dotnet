@@ -16,10 +16,10 @@
 
 #pragma warning disable xUnit1026
 
+using Newtonsoft.Json.Linq;
 using System;
 using System.Collections.Generic;
 using Xunit;
-using Newtonsoft.Json.Linq;
 
 
 namespace Confluent.Kafka.IntegrationTests
@@ -36,7 +36,7 @@ namespace Confluent.Kafka.IntegrationTests
 
             var config = new AdminClientConfig { BootstrapServers = bootstrapServers };
 
-            using (var adminClient = new AdminClient(config))
+            using (var adminClient = new AdminClientBuilder(config).Build())
             {
                 var metadata = adminClient.GetMetadata(TimeSpan.FromSeconds(10));
                 Assert.NotNull(metadata.Brokers);

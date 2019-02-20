@@ -16,6 +16,7 @@
 
 #pragma warning disable xUnit1026
 
+using Confluent.Kafka.Serdes;
 using System;
 using System.Collections.Generic;
 using System.Text;
@@ -37,37 +38,40 @@ namespace Confluent.Kafka.IntegrationTests
             {
                 GroupId = Guid.NewGuid().ToString(),
                 BootstrapServers = bootstrapServers,
-                AutoOffsetReset = AutoOffsetResetType.Latest,
+                AutoOffsetReset = AutoOffsetReset.Latest,
                 EnableAutoCommit = true,
                 EnableAutoOffsetStore = false
             };
 
             var producerConfig = new ProducerConfig{ BootstrapServers = bootstrapServers };
 
-            using (var producer = new Producer<Null, string>(producerConfig))
-            using (var consumer = new Consumer<Null, string>(consumerConfig))
+            IEnumerable<TopicPartition> assignment = null;
+
+            using (var producer = new ProducerBuilder<byte[], byte[]>(producerConfig).Build())
+            using (var consumer =
+                new ConsumerBuilder<Null, string>(consumerConfig)
+                    .SetRebalanceHandler((c, e) =>
+                    {
+                        if (e.IsAssignment)
+                        {
+                            c.Assign(e.Partitions);
+                            assignment = e.Partitions;
+                        }
+                    })
+                    .Build())
             {
-                IEnumerable<TopicPartition> assignedPartitions = null;
-                ConsumeResult<Null, string> record;
-
-                consumer.OnPartitionsAssigned += (_, partitions) =>
-                {
-                    consumer.Assign(partitions);
-                    assignedPartitions = partitions;
-                };
-
                 consumer.Subscribe(topic);
 
-                while (assignedPartitions == null)
+                while (assignment == null)
                 {
-                    consumer.Consume(TimeSpan.FromSeconds(1));
+                    consumer.Consume(TimeSpan.FromSeconds(10));
                 }
 
-                record = consumer.Consume(TimeSpan.FromSeconds(1));
+                ConsumeResult<Null, string> record = consumer.Consume(TimeSpan.FromSeconds(10));
                 Assert.Null(record);
 
-                producer.ProduceAsync(topic, new Message<Null, string> { Value = "test store offset value" }).Wait();
-                record = consumer.Consume(TimeSpan.FromSeconds(30));
+                producer.ProduceAsync(topic, new Message<byte[], byte[]> { Value = Serializers.Utf8.Serialize("test store offset value", true, null, null) }).Wait();
+                record = consumer.Consume(TimeSpan.FromSeconds(10));
                 Assert.NotNull(record?.Message);
 
                 // test doesn't throw.

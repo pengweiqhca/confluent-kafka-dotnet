@@ -16,10 +16,10 @@
 
 #pragma warning disable xUnit1026
 
+using Confluent.Kafka.Serdes;
 using System;
-using System.Text;
-using System.Threading;
 using System.Collections.Generic;
+using System.Text;
 using Xunit;
 
 
@@ -41,15 +41,15 @@ namespace Confluent.Kafka.IntegrationTests
             var producerConfig = new ProducerConfig { BootstrapServers = bootstrapServers };
             var consumerConfig = new ConsumerConfig { GroupId = Guid.NewGuid().ToString(), BootstrapServers = bootstrapServers };
 
-            using (var producer = new Producer<Null, string>(producerConfig))
+            using (var producer = new ProducerBuilder<byte[], byte[]>(producerConfig).Build())
             {
-                producer.ProduceAsync(singlePartitionTopic, new Message<Null, string> { Value = "test string" }).Wait();
+                producer.ProduceAsync(singlePartitionTopic, new Message<byte[], byte[]> { Value = Serializers.Utf8.Serialize("test string", true, null, null) }).Wait();
             }
 
-            using (var consumer = new Consumer<Null, string>(consumerConfig))
+            using (var consumer = new ConsumerBuilder<byte[], byte[]>(consumerConfig).Build())
             {
                 consumer.Subscribe(singlePartitionTopic);
-                consumer.Consume(TimeSpan.FromMilliseconds(1000));
+                consumer.Consume(TimeSpan.FromSeconds(10));
                 consumer.Close();
             }
 

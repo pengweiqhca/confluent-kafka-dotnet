@@ -1,4 +1,4 @@
-// Copyright 2016-2017 Confluent Inc., 2015-2016 Andreas Heider
+// Copyright 2018 Confluent Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -11,8 +11,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-//
-// Derived from: rdkafka-dotnet, licensed under the 2-clause BSD License.
 //
 // Refer to LICENSE for more information.
 
@@ -31,20 +29,39 @@ namespace Confluent.Kafka
         ///     an existing Error value.
         /// </summary>
         /// <param name="error"> 
-        ///     The error associated with the delivery report.
+        ///     The error associated with the delivery result.
         /// </param>
-        /// <param name="deliveryReport">
-        ///     The delivery report associated with the produce request.
+        /// <param name="deliveryResult">
+        ///     The delivery result associated with the produce request.
         /// </param>
-        public ProduceException(Error error, DeliveryReport<TKey, TValue> deliveryReport)
-            : base(error)
+        /// <param name="innerException">
+        ///     The exception instance that caused this exception.
+        /// </param>
+        public ProduceException(Error error, DeliveryResult<TKey, TValue> deliveryResult, Exception innerException)
+            : base(error, innerException)
         {
-            DeliveryReport = deliveryReport;
+            DeliveryResult = deliveryResult;
         }
 
         /// <summary>
-        ///     The delivery report associated with the produce request.
+        ///     Initialize a new instance of ProduceException based on 
+        ///     an existing Error value.
         /// </summary>
-        public DeliveryReport<TKey, TValue> DeliveryReport { get; }
+        /// <param name="error"> 
+        ///     The error associated with the delivery report.
+        /// </param>
+        /// <param name="deliveryResult">
+        ///     The delivery result associated with the produce request.
+        /// </param>
+        public ProduceException(Error error, DeliveryResult<TKey, TValue> deliveryResult)
+            : base(error)
+        {
+            DeliveryResult = deliveryResult;
+        }
+
+        /// <summary>
+        ///     The delivery result associated with the produce request.
+        /// </summary>
+        public DeliveryResult<TKey, TValue> DeliveryResult { get; }
     }
 }

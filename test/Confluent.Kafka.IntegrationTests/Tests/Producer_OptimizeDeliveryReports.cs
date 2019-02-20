@@ -42,11 +42,35 @@ namespace Confluent.Kafka.IntegrationTests
                 DeliveryReportFields = "none"
             };
 
-            using (var producer = new Producer<byte[], byte[]>(producerConfig))
+
+            // serializing case. 
+
+            using (var producer = new ProducerBuilder<byte[], byte[]>(producerConfig).Build())
             {
                 var dr = await producer.ProduceAsync(
                     singlePartitionTopic, 
                     new Message<byte[], byte[]> 
+                    { 
+                        Key = TestKey, 
+                        Value = TestValue, 
+                        Headers = new Headers() { new Header("my-header", new byte[] { 42 }) } 
+                    }
+                );
+                Assert.Equal(TimestampType.NotAvailable, dr.Timestamp.Type);
+                Assert.Equal(0, dr.Timestamp.UnixTimestampMs);
+                Assert.Null(dr.Value);
+                Assert.Null(dr.Key);
+                Assert.Null(dr.Headers);
+            }
+
+
+            // byte[] case. 
+
+            using (var producer = new ProducerBuilder<byte[], byte[]>(producerConfig).Build())
+            {
+                var dr = await producer.ProduceAsync(
+                    singlePartitionTopic, 
+                    new Message<byte[], byte[]>
                     { 
                         Key = TestKey, 
                         Value = TestValue, 

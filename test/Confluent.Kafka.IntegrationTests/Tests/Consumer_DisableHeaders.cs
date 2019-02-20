@@ -16,6 +16,7 @@
 
 #pragma warning disable xUnit1026
 
+using Confluent.Kafka.Serdes;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -45,27 +46,27 @@ namespace Confluent.Kafka.IntegrationTests
 
             var producerConfig = new ProducerConfig { BootstrapServers = bootstrapServers };
 
-            DeliveryReport<Null, string> dr;
-            using (var producer = new Producer<Null, string>(producerConfig))
+            DeliveryResult<byte[], byte[]> dr;
+            using (var producer = new ProducerBuilder<byte[], byte[]>(producerConfig).Build())
             {
                 dr = producer.ProduceAsync(
                     singlePartitionTopic,
-                    new Message<Null, string>
+                    new Message<byte[], byte[]>
                     {
-                        Value = "my-value", 
+                        Value = Serializers.Utf8.Serialize("my-value", true, null, null),
                         Headers = new Headers() { new Header("my-header", new byte[] { 42 }) }
                     }
                 ).Result;
             }
 
-            using (var consumer = new Consumer<Null, string>(consumerConfig))
-            {
-                consumer.OnError += (_, e)
-                    => Assert.True(false, e.Reason);
-                    
+            using (var consumer =
+                new ConsumerBuilder<byte[], byte[]>(consumerConfig)
+                    .SetErrorHandler((_, e) => Assert.True(false, e.Reason))
+                    .Build())
+            {                    
                 consumer.Assign(new TopicPartitionOffset[] { new TopicPartitionOffset(singlePartitionTopic, 0, dr.Offset) });
 
-                var record = consumer.Consume(TimeSpan.FromSeconds(30));
+                var record = consumer.Consume(TimeSpan.FromSeconds(10));
                 Assert.NotNull(record.Message);
                 Assert.Null(record.Message.Headers);
                 Assert.NotEqual(TimestampType.NotAvailable, record.Timestamp.Type);

@@ -36,7 +36,7 @@ namespace Confluent.Kafka.IntegrationTests
             LogToFile("start Consumer_Subscription");
             
             int N = 2;
-            var firstProduced = Util.ProduceMessages(bootstrapServers, singlePartitionTopic, 1, N);
+            var firstProduced = Util.ProduceNullStringMessages(bootstrapServers, singlePartitionTopic, 1, N);
 
             var consumerConfig = new ConsumerConfig
             {
@@ -45,28 +45,32 @@ namespace Confluent.Kafka.IntegrationTests
                 SessionTimeoutMs = 6000
             };
 
-            using (var consumer = new Consumer<Null, string>(consumerConfig))
+            using (var consumer =
+                new ConsumerBuilder<byte[], byte[]>(consumerConfig)
+                    .SetRebalanceHandler((c, e) =>
+                    {
+                        if (e.IsAssignment)
+                        {
+                            Assert.Single(e.Partitions);
+                            Assert.Equal(firstProduced.TopicPartition, e.Partitions[0]);
+                            c.Assign(e.Partitions.Select(p => new TopicPartitionOffset(p, firstProduced.Offset)));
+                            // test non-empty case.
+                            Assert.Single(c.Subscription);
+                            Assert.Equal(singlePartitionTopic, c.Subscription[0]);
+                        }
+                        else
+                        {
+                            c.Unassign();
+                        }
+                    })
+                    .Build())
             {
                 // Test empty case.
                 Assert.Empty(consumer.Subscription);
 
-                consumer.OnPartitionsAssigned += (_, partitions) =>
-                {
-                    Assert.Single(partitions);
-                    Assert.Equal(firstProduced.TopicPartition, partitions[0]);
-                    consumer.Assign(partitions.Select(p => new TopicPartitionOffset(p, firstProduced.Offset)));
-
-                    // test non-empty case.
-                    Assert.Single(consumer.Subscription);
-                    Assert.Equal(singlePartitionTopic, consumer.Subscription[0]);
-                };
-
-                consumer.OnPartitionsRevoked += (_, partitions)
-                    => consumer.Unassign();
-
                 consumer.Subscribe(singlePartitionTopic);
 
-                var r = consumer.Consume(TimeSpan.FromSeconds(20));
+                var r = consumer.Consume(TimeSpan.FromSeconds(10));
 
                 consumer.Close();
             }
